@@ -55,7 +55,10 @@ const modelFor = (id) => MODELS.find((m) => m.id === id) || MODELS[0];
 
 // ---------------------------------------------------------------- translation
 
-const MAX_PROMPT_CHARS = 60000;
+// 网页版上下文 128K tokens：给回复留 ~32K，其余留给上下文。
+// 注意：工具说明（DSH 有 60+ 个工具）必须完整保留，否则模型不会调用工具。
+const MAX_PROMPT_TOKENS = Number(process.env.DSW_MAX_PROMPT_TOKENS || 96000);
+const MAX_PROMPT_CHARS = Number(process.env.DSW_MAX_PROMPT_CHARS || 260000);
 
 function sanitizePrompt(text) {
   return String(text || '')
@@ -98,6 +101,18 @@ function cleanHistoryText(t) {
   return out;
 }
 
+/** 把 assistant 消息里的 tool_calls 变成一行可读文本，供历史/续聊提示使用。 */
+function describeToolCalls(m) {
+  if (!m || !Array.isArray(m.tool_calls) || !m.tool_calls.length) return '';
+  return m.tool_calls
+    .map((tc) => {
+      const f = tc.function || {};
+      const args = typeof f.arguments === 'string' ? f.arguments : JSON.stringify(f.arguments || {});
+      return '（我调用了工具 ' + (f.name || '?') + '，参数 ' + args.slice(0, 400) + '）';
+    })
+    .join('\n');
+}
+
 function buildNewChatPrompt(messages, tools) {
   const pick = (v) => sanitizePrompt(cleanHistoryText(typeof v === 'string' ? v : contentToText(v)));
   const list = (messages || []).filter((m) => m && m.role);
@@ -106,41 +121,88 @@ function buildNewChatPrompt(messages, tools) {
     .map((m) => pick(m.content))
     .filter(Boolean)
     .join('\n\n');
+  const callNames = new Map();
+  for (const m of list) {
+    if (Array.isArray(m.tool_calls)) {
+      for (const tc of m.tool_calls) if (tc && tc.id) callNames.set(tc.id, tc.function?.name || '工具');
+    }
+  }
   const convo = list
     .filter((m) => m.role === 'user' || m.role === 'assistant' || m.role === 'tool')
-    .map((m) => ({ role: m.role, text: pick(m.content) }))
+    .map((m) => {
+      let text = pick(m.content);
+      if (m.role === 'assistant') text = [describeToolCalls(m), text].filter(Boolean).join('\n');
+      if (m.role === 'tool' && m.tool_call_id && callNames.has(m.tool_call_id)) {
+        text = '（' + callNames.get(m.tool_call_id) + ' 的返回结果）\n' + text;
+      }
+      return { role: m.role, text };
+    })
     .filter((m) => m.text);
 
   const lastUser = [...convo].reverse().find((m) => m.role === 'user');
   if (!lastUser) return sys || '';
-  const prior = convo.slice(0, convo.lastIndexOf(lastUser));
+  // 关键：最后一条 user 之后的 assistant/tool 消息（工具调用与工具结果）必须跟在后面一起发，
+  // 否则模型看不到工具结果，会重复调用同一个工具。
+  const lastIdx = convo.lastIndexOf(lastUser);
+  const tail = lastUser.text;
+  const after = convo.slice(lastIdx + 1);
+  const prior = convo.slice(0, lastIdx);
+  const lead = LEAD_INS[Math.floor(Math.random() * LEAD_INS.length)];
 
-  const parts = [];
-  if (sys) parts.push(sys);
-  const toolDoc = renderTools(tools);
-  if (toolDoc) parts.push(toolDoc.trim());
-  if (prior.length) {
-    // 之前聊过：以「我：/你：」的口吻续上，像人贴记录，而不是机器拼接 transcript
-      const relabel = prior
+  const lastIsToolResult = after.length > 0 && after[after.length - 1].role === 'tool';
+  const toolResultHint = lastIsToolResult
+    ? '（末尾是工具的真实返回结果。够回答就直接给最终答案，不要重复调用同一个工具；确实还需要别的工具时才继续调用。）'
+    : '';
+
+  const relabel = (slice) =>
+    slice
       .map((m) => (m.role === 'user' ? '我：' : m.role === 'tool' ? '（工具结果）' : '你：') + m.text)
       .join('\n\n');
-    parts.push('（接着之前聊的内容继续，前面大概是：）\n' + relabel);
-  }
-  const lead = LEAD_INS[Math.floor(Math.random() * LEAD_INS.length)];
-  const head = parts.length ? lead + '\n\n' + parts.join('\n\n') + '\n\n' : '';
-  const tail = lastUser.text;
-  const all = head + tail;
-  if (all.length <= MAX_PROMPT_CHARS) return all;
 
-  // 超长：保 system 开头 + 最后一条用户消息，中间的旧历史丢掉；总长必须受控
-  const toolLen = (toolDoc || '').length;
-  const sysBudget = Math.max(2000, MAX_PROMPT_CHARS - tail.length - toolLen - 800);
-  const sysHead = (sys || '').slice(0, sysBudget);
-  const out = lead + '\n\n' + sysHead + (sys.length > sysHead.length ? '\n\n（前面的对话太长，这里省略了一部分）' : '') + '\n\n' + tail;
-  log('[prompt] truncated: ' + all.length + ' → ' + out.length + ' chars (sys kept ' + sysHead.length + '/' + sys.length + ')');
+  /** 组装完整 prompt：系统设定 + 工具说明 + 历史 + 最后一条用户消息。 */
+  const compose = (priorSlice, note, toolDoc) => {
+    const parts = [];
+    if (sys) parts.push(sys);
+    if (toolDoc) parts.push(toolDoc.trim());
+    if (note) parts.push(note);
+    if (priorSlice.length) parts.push('（接着之前聊的内容继续，前面大概是：）\n' + relabel(priorSlice));
+    if (toolResultHint) parts.push(toolResultHint);
+    const head = parts.length ? lead + '\n\n' + parts.join('\n\n') + '\n\n' : '';
+    let outTail = tail;
+    for (const m of after) {
+      if (m.role === 'tool') outTail += '\n\n工具执行完了，结果如下：\n' + m.text;
+      else if (m.role === 'assistant') outTail += '\n\n' + m.text;
+      else outTail += '\n\n我：' + m.text;
+    }
+    return head + outTail;
+  };
+
+  // 1) 先按完整工具说明试；2) 仍超预算就压工具说明；3) 再超才丢最旧的历史。
+  // 关键：工具说明和系统设定永远保留 —— 丢了它们模型就用不了工具、也看不懂提问格式。
+  let toolDoc = renderTools(tools, 'full');
+  let slice = prior;
+  let note = '';
+  let out = compose(slice, note, toolDoc);
+  if (estimateTokens(out) > MAX_PROMPT_TOKENS) {
+    toolDoc = renderTools(tools, 'compact');
+    out = compose(slice, note, toolDoc);
+  }
+  let dropped = 0;
+  while (estimateTokens(out) > MAX_PROMPT_TOKENS && slice.length > 0) {
+    const drop = Math.max(1, Math.ceil(slice.length * 0.3));
+    slice = slice.slice(drop);
+    dropped += drop;
+    note = '（更早的对话太长，已省略 ' + dropped + ' 条历史消息）';
+    out = compose(slice, note, toolDoc);
+  }
+  if (estimateTokens(out) > MAX_PROMPT_TOKENS) {
+    toolDoc = renderTools(tools, 'names');
+    out = compose(slice, note, toolDoc);
+  }
+  if (dropped) log('[prompt] dropped ' + dropped + ' old message(s) to fit tool docs');
+  log('[prompt] size=' + out.length + ' chars ~' + estimateTokens(out) + ' tok sys=' + sys.length + ' tools=' + toolDoc.length + ' history=' + slice.length);
   return out;
 }
-
 
 // ------------------------------------------------------------------ tool use
 // 网页模型没有原生 function calling，这里用「纯文本工具协议」：
@@ -148,22 +210,44 @@ function buildNewChatPrompt(messages, tools) {
 const TOOL_OPEN = '@@TOOL@@';
 const TOOL_CLOSE = '@@END@@';
 
-function renderTools(tools) {
+function renderTools(tools, mode = 'full') {
   if (!Array.isArray(tools) || !tools.length) return '';
+  // full 给足细节（工具描述里有使用规则时不能截太狠）；预算不够时自动降级到 compact/names
+  const perDesc = mode === 'full' ? 600 : 200;
+  const perParams = mode === 'full' ? 2400 : mode === 'compact' ? 500 : 0;
   const lines = [];
   for (const t of tools) {
     const f = t.function || t;
     if (!f?.name) continue;
-    const params = f.parameters ? JSON.stringify(f.parameters) : '{}';
-    lines.push('- ' + f.name + '：' + String(f.description || '').replace(/\s+/g, ' ').slice(0, 300) + '｜参数 ' + params.slice(0, 900));
+    const desc = String(f.description || '').replace(/\s+/g, ' ').slice(0, perDesc);
+    let params = '';
+    if (perParams > 0 && f.parameters) {
+      let raw = '';
+      try { raw = JSON.stringify(f.parameters); } catch { raw = ''; }
+      if (raw.length > perParams) {
+        // 参数结构太大：退化成「属性名 + 必填」列表，模型仍能拼出合法参数
+        const props = f.parameters.properties && typeof f.parameters.properties === 'object' ? Object.keys(f.parameters.properties) : [];
+        const required = Array.isArray(f.parameters.required) ? f.parameters.required : [];
+        params = '｜参数 ' + props.map((k) => k + (required.includes(k) ? '*' : '')).join(', ');
+      } else {
+        params = '｜参数 ' + raw;
+      }
+    } else if (mode === 'names' && f.parameters && f.parameters.properties) {
+      const props = Object.keys(f.parameters.properties);
+      params = '｜参数 ' + props.join(', ');
+    }
+    lines.push('- ' + f.name + '：' + desc + params);
   }
   if (!lines.length) return '';
-  return (
-    '\n\n【可用工具】需要动手时，单独输出一个工具块，不要用别的格式，也不要在块外写命令：\n' +
-    TOOL_OPEN + '\n{"name":"工具名","arguments":{"参数名":"值"}}\n' + TOOL_CLOSE + '\n' +
-    '一次只调用一个工具；工具结果我会贴回给你。不用工具时正常回答。\n' +
-    lines.join('\n')
-  );
+  const hint =
+    mode === 'names'
+      ? '\n\n【可用工具】以下工具可以调用，参数用常规 JSON：\n'
+      : '\n\n【可用工具】需要读写文件、执行命令、搜索、提问确认时，必须真的调用工具，而不是在正文里描述。\n' +
+        '规则：整条回复只输出下面这一个块，块外不要写任何文字；块内是合法 JSON；一次只调一个。\n' +
+        TOOL_OPEN + '\n{"name":"工具名","arguments":{"参数名":"值"}}\n' + TOOL_CLOSE + '\n' +
+        '工具执行完我会把结果贴回给你（以「工具执行完了」开头），你据此继续。不需要工具时正常回答。\n' +
+        '需要用户做选择/补充信息时，调用提问类工具（如 ask_user_question），不要只在正文里问。\n';
+  return hint + lines.join('\n');
 }
 
 // 把模型输出里的工具块切出来；返回 { text, calls }
@@ -328,12 +412,17 @@ async function handleChat(req, res) {
   for (const m of messages) {
     if (!m || (m.role !== 'user' && m.role !== 'assistant' && m.role !== 'tool')) continue;
     const text = cleanHistoryText(typeof m.content === 'string' ? m.content : contentToText(m.content));
-    if (text) transcript.push({ role: m.role, text });
+    const calls = describeToolCalls(m);
+    const line = [calls, text].filter(Boolean).join('\n');
+    if (line) transcript.push({ role: m.role, text: line });
   }
   const digest = crypto.createHash('sha1').update(JSON.stringify(transcript)).digest('hex');
 
   const lastUser = [...messages].reverse().find((m) => m.role === 'user');
   const toolDoc = renderTools(tools);
+  if (process.env.DSW_DUMP_PROMPT) {
+    try { fs.writeFileSync(process.env.DSW_DUMP_PROMPT, '') ; } catch {}
+  }
 
   let continuing = Boolean(prev?.sessionId);
   let reason = 'new';
@@ -352,12 +441,13 @@ async function handleChat(req, res) {
     })();
     if (prefixOk && !replyOk) log('[ctx] assistant reply was rewritten → treat as diverged');
     if (!prefixOk || !replyOk) {
-      const fullSize = messages.reduce((n, m) => n + (typeof m.content === 'string' ? m.content.length : 0), 0);
-      if (fullSize > MAX_PROMPT_CHARS) {
+      const fullText = messages.map((m) => (typeof m.content === 'string' ? m.content : contentToText(m.content))).join('\n');
+      const fullTokens = estimateTokens(fullText) + estimateTokens(toolDoc);
+      if (fullTokens > MAX_PROMPT_TOKENS) {
         // 历史太大，重发全量会被上游截断（问题反被切掉）；网页会话里已经有大部分内容，继续用它
         continuing = true;
         reason = 'soft-continuation';
-        log('[ctx] diverged but transcript too big (' + fullSize + ' chars) → keep session, send tail only');
+        log('[ctx] diverged but transcript too big (~' + fullTokens + ' tok) → keep session, send tail only');
       } else {
         continuing = false;
         reason = 'diverged';
@@ -380,7 +470,7 @@ async function handleChat(req, res) {
     const parts = [];
     if (tail.length > 1) parts.push('（接着上面继续，期间还有这些内容）');
     for (const m of tail) {
-      if (m.role === 'tool') parts.push('工具执行完了，结果如下（接着上面的活儿干，别重复已经做过的）：\n' + m.text);
+      if (m.role === 'tool') parts.push('工具执行完了，结果如下（接着上面的活儿干，别重复调用同一个工具；够回答就直接给结论）：\n' + m.text);
       else parts.push(m.text);
     }
     if (!parts.length) {
@@ -389,16 +479,29 @@ async function handleChat(req, res) {
     }
     reason = wasSoft ? 'soft-continuation' : lastTool ? 'tool-continuation' : 'continuation';
     let body = parts.join('\n\n');
-    if (body.length > MAX_PROMPT_CHARS) {
-      log('[prompt] continuation too long (' + body.length + ') → keep the newest part');
-      body = body.slice(-MAX_PROMPT_CHARS);
+    // 续聊也要守住 token 预算，但工具说明必须完整带上（否则模型这一轮不会调用工具）
+    let doc = toolDoc || '';
+    let budget = MAX_PROMPT_TOKENS - estimateTokens(doc) - 1200;
+    if (estimateTokens(body) > budget) {
+      doc = renderTools(tools, 'compact');
+      budget = MAX_PROMPT_TOKENS - estimateTokens(doc) - 1200;
     }
-    prompt = body + (toolDoc || '');
+    if (estimateTokens(body) > budget) {
+      const before = estimateTokens(body);
+      while (estimateTokens(body) > budget && body.length > 4000) {
+        body = body.slice(Math.max(2000, Math.ceil(body.length * 0.3)));
+      }
+      log('[prompt] continuation trimmed ~' + before + ' → ~' + estimateTokens(body) + ' tok');
+    }
+    prompt = body + doc;
   } else {
     prompt = buildNewChatPrompt(messages, tools);
   }
   log('[ctx] conv=' + convKey.slice(0, 8) + ' mode=' + reason + ' sent=' + transcript.length + ' prompt=' + prompt.length + ' session=' + (continuing ? String(prev.sessionId).slice(0, 8) : 'new'));
   if (prompt.length > MAX_PROMPT_CHARS) log('[prompt] WARNING oversize ' + prompt.length);
+  if (process.env.DSW_DUMP_PROMPT) {
+    try { fs.writeFileSync(process.env.DSW_DUMP_PROMPT, prompt); } catch (e) { log('[prompt] dump failed: ' + e.message); }
+  }
 
   const id = 'chatcmpl-' + Math.random().toString(36).slice(2, 12);
   const created = Math.floor(Date.now() / 1000);
@@ -626,6 +729,7 @@ async function handleChat(req, res) {
 
   if (stream) {
     if (toolCalls.length) {
+      if (!headersSent) sendChunk({ role: 'assistant', content: '' });
       sendChunk({ tool_calls: toolCalls.map((tc, i) => ({ index: i, id: tc.id, type: 'function', function: tc.function })) });
       sendChunk({}, 'tool_calls');
     } else {
@@ -678,6 +782,22 @@ function json(res, status, obj) {
   const buf = Buffer.from(JSON.stringify(obj));
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': buf.length });
   res.end(buf);
+}
+
+// 自检：DSW_SELFTEST_PROMPT=<json 文件> 时只构造 prompt 并打印统计，不监听端口。
+if (process.env.DSW_SELFTEST_PROMPT) {
+  const spec = JSON.parse(fs.readFileSync(process.env.DSW_SELFTEST_PROMPT, 'utf8'));
+  const prompt = buildNewChatPrompt(spec.messages || [], spec.tools || []);
+  const doc = renderTools(spec.tools || [], 'full');
+  console.log(JSON.stringify({
+    chars: prompt.length,
+    tokens: estimateTokens(prompt),
+    toolDocChars: doc.length,
+    toolDocInPrompt: prompt.includes(doc.slice(0, 80)),
+    tailInPrompt: prompt.includes(String((spec.messages || []).filter((m) => m.role === 'user').pop()?.content || '').slice(0, 60)),
+    head: prompt.slice(0, 120),
+  }, null, 2));
+  process.exit(0);
 }
 
 server.listen(PORT, HOST, () => log(`deepseek-web-bridge listening on http://${HOST}:${PORT}`));

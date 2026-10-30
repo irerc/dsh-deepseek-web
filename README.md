@@ -24,7 +24,7 @@ git+https://gh-proxy.com/https://github.com/wsxuyue/dsh-deepseek-web.git
 **② 发行版压缩包（镜像，最快）**
 
 ```
-https://gh-proxy.com/https://github.com/wsxuyue/dsh-deepseek-web/releases/latest/download/dsh-deepseek-web-1.0.1.tgz
+https://gh-proxy.com/https://github.com/wsxuyue/dsh-deepseek-web/releases/latest/download/dsh-deepseek-web-1.0.2.tgz
 ```
 
 **③ 仓库页（镜像浏览）**
@@ -36,7 +36,7 @@ https://gh-proxy.com/https://github.com/wsxuyue/dsh-deepseek-web
 > 镜像不可用时，把上面链接里的 `https://gh-proxy.com/` 去掉即可直连 GitHub（官方速度可能较慢）：
 >
 > - 插件 spec：`https://github.com/wsxuyue/dsh-deepseek-web`
-> - 压缩包：`https://github.com/wsxuyue/dsh-deepseek-web/releases/latest/download/dsh-deepseek-web-1.0.1.tgz`
+> - 压缩包：`https://github.com/wsxuyue/dsh-deepseek-web/releases/latest/download/dsh-deepseek-web-1.0.2.tgz`
 
 **不需要任何 API key**：插件自带 provider 配置与本地网关（`127.0.0.1:18081`），装好即用。
 
@@ -129,3 +129,15 @@ bin/cli.mjs           login/accounts/start/stop/status/doctor
 直连网页接口属于自动化访问，可能触发站点风控；多账号会放大风险。插件做了串行、节流、真实浏览器请求头与自然提示词，但**不能保证不被限流或封禁**。
 
 MIT License
+
+## 更新日志
+
+### v1.0.2
+
+- **上下文不再被截断**：以前 prompt 超过 6 万字符会把工具说明整段丢掉，导致模型「不会用工具、看不到提问功能」。现在按 **token** 预算（默认 96K，可用 `DSW_MAX_PROMPT_TOKENS` 调）分配：
+  - 系统设定与工具说明**永远保留**（工具说明放不下时先降级压缩，而不是删除）
+  - 只从最旧的历史开始裁剪，并在正文里标注省略了多少条
+- **工具结果可见**：最后一条用户消息之后的 `assistant(tool_calls)` 与 `tool` 结果现在会一起发给网页模型，并在历史里标成「（我调用了工具 X）／（X 的返回结果）」，模型不会再重复调用同一个工具。
+- **工具调用协议更明确**：提示词要求「整条回复只输出工具块」，并点明需要用户选择时调用 `ask_user_question` 这类提问工具。
+- 流式返回补充 `role: assistant` 起始块，兼容更多 OpenAI 客户端。
+- 工具说明默认给出更完整的描述与参数（600 字描述 / 2400 字参数），预算不足时自动压缩。
