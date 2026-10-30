@@ -101,14 +101,30 @@ function cleanHistoryText(t) {
   return out;
 }
 
+/** 参数串在提示词里保持可读：把 \n、\" 这类 JSON 转义还原成真实字符，避免模型模仿转义写法。 */
+function readableArgs(text) {
+  return String(text || '')
+    .replace(/\\r\\n/g, ' ')
+    .replace(/\\n/g, ' ')
+    .replace(/\\t/g, ' ')
+    .replace(/\\"/g, '"')
+    .replace(/\\{2}/g, '\\')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 /** 把 assistant 消息里的 tool_calls 变成一行可读文本，供历史/续聊提示使用。 */
 function describeToolCalls(m) {
   if (!m || !Array.isArray(m.tool_calls) || !m.tool_calls.length) return '';
   return m.tool_calls
     .map((tc) => {
       const f = tc.function || {};
-      const args = typeof f.arguments === 'string' ? f.arguments : JSON.stringify(f.arguments || {});
-      return '（我调用了工具 ' + (f.name || '?') + '，参数 ' + args.slice(0, 400) + '）';
+      let args = f.arguments;
+      if (typeof args === 'string') {
+        try { args = JSON.parse(args); } catch {}
+      }
+      const shown = typeof args === 'string' ? args : JSON.stringify(args || {});
+      return '（我调用了工具 ' + (f.name || '?') + '，参数 ' + readableArgs(shown).slice(0, 300) + '）';
     })
     .join('\n');
 }
@@ -246,7 +262,9 @@ function renderTools(tools, mode = 'full') {
         '规则：整条回复只输出下面这一个块，块外不要写任何文字；块内是合法 JSON；一次只调一个。\n' +
         TOOL_OPEN + '\n{"name":"工具名","arguments":{"参数名":"值"}}\n' + TOOL_CLOSE + '\n' +
         '工具执行完我会把结果贴回给你（以「工具执行完了」开头），你据此继续。不需要工具时正常回答。\n' +
-        '需要用户做选择/补充信息时，调用提问类工具（如 ask_user_question），不要只在正文里问。\n';
+        '需要用户做选择/补充信息时，调用提问类工具（如 ask_user_question），不要只在正文里问。\n' +
+        '正文请使用真实换行和普通 Markdown，不要输出 JSON 转义写法（例如不要在正文里写 \\n）。\n' +
+        '工具参数里的长文本要分块：单次写入控制在 2000 字左右，不要一次传入超长内容（会被上游截断）。\n';
   return hint + lines.join('\n');
 }
 
@@ -522,9 +540,26 @@ async function handleChat(req, res) {
   };
 
   let rawText = '';
+  // 网页模型偶尔整段输出 JSON 转义（正文里写 \n），这里做保守还原：
+  // 仅当这段文字几乎没有真实换行、却有多个 \n 时才转换，否则原样保留。
+  let heldBackslash = '';
+  const normalizeDelta = (t) => {
+    let out = heldBackslash + t;
+    heldBackslash = '';
+    if (out.endsWith('\\')) {
+      heldBackslash = '\\';
+      out = out.slice(0, -1);
+    }
+    const esc = (out.match(/\\n/g) || []).length;
+    const real = (out.match(/\n/g) || []).length;
+    if (esc >= 3 && esc > real * 3) {
+      out = out.replace(/\\r\\n/g, '\n').replace(/\\n/g, '\n').replace(/\\t/g, ' ').replace(/\\"/g, '"');
+    }
+    return out;
+  };
   const emitText = (t) => {
     if (!t) return;
-    const clean = stripSentinels(t);
+    const clean = stripSentinels(normalizeDelta(t));
     if (!clean) return;
     textOut += clean;
     if (!stream) return;
@@ -591,7 +626,21 @@ async function handleChat(req, res) {
     }
   };
   const endTools = () => {
-    if (mode === 'tool') { emitText(TOOL_OPEN + buf); buf = ''; mode = 'text'; return; }
+    if (mode === 'tool') {
+      // 工具块没等到 @@END@@（多数是参数太长被上游截断）。此时绝不能把原始 JSON 当正文吐出去，
+      // 否则用户会看到满屏的 \n 转义。能解析就收下，解析不了就给一句简短说明。
+      const parsed = parseToolJson(buf);
+      buf = '';
+      mode = 'text';
+      if (parsed) {
+        calls.push(parsed);
+        log('[tool] recovered unclosed tool block: ' + parsed.name);
+      } else {
+        log('[tool] dropped unclosed tool block');
+        emitText('\n\n（本轮工具调用内容过长被截断，已忽略；请拆成更小的步骤后重试。）');
+      }
+      return;
+    }
     if (mode === 'dsml') {
       dsmlBuf += buf;
       buf = '';
@@ -604,6 +653,7 @@ async function handleChat(req, res) {
       return;
     }
     if (buf) { emitText(buf); buf = ''; }
+    if (heldBackslash) { emitText(heldBackslash); heldBackslash = ''; }
   };
 
   try {

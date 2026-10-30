@@ -24,7 +24,7 @@ git+https://gh-proxy.com/https://github.com/wsxuyue/dsh-deepseek-web.git
 **② 发行版压缩包（镜像，最快）**
 
 ```
-https://gh-proxy.com/https://github.com/wsxuyue/dsh-deepseek-web/releases/latest/download/dsh-deepseek-web-1.0.2.tgz
+https://gh-proxy.com/https://github.com/wsxuyue/dsh-deepseek-web/releases/latest/download/dsh-deepseek-web-1.0.3.tgz
 ```
 
 **③ 仓库页（镜像浏览）**
@@ -36,7 +36,7 @@ https://gh-proxy.com/https://github.com/wsxuyue/dsh-deepseek-web
 > 镜像不可用时，把上面链接里的 `https://gh-proxy.com/` 去掉即可直连 GitHub（官方速度可能较慢）：
 >
 > - 插件 spec：`https://github.com/wsxuyue/dsh-deepseek-web`
-> - 压缩包：`https://github.com/wsxuyue/dsh-deepseek-web/releases/latest/download/dsh-deepseek-web-1.0.2.tgz`
+> - 压缩包：`https://github.com/wsxuyue/dsh-deepseek-web/releases/latest/download/dsh-deepseek-web-1.0.3.tgz`
 
 **不需要任何 API key**：插件自带 provider 配置与本地网关（`127.0.0.1:18081`），装好即用。
 
@@ -131,6 +131,14 @@ bin/cli.mjs           login/accounts/start/stop/status/doctor
 MIT License
 
 ## 更新日志
+
+### v1.0.3
+
+- **修复「满屏 \n」的乱码回复**：模型给出的工具调用块参数过长、被上游截断（没有结束标记）时，旧代码会把整段 JSON 当正文吐出来，用户就看到带 `\n` 转义的乱码。
+  - 现在：能解析就照常当工具调用；解析不了只给一句「工具调用内容过长被截断，请拆成更小步骤」，不再把原始 JSON 当正文。
+  - 正文里成片出现的 `\n` 转义会自动还原成真实换行。
+- **提示词约束**：正文必须用真实换行 / 普通 Markdown，禁止输出 JSON 转义写法；工具参数里的长文本要求分块（单次约 2000 字）。
+- 历史里展示工具参数时会把转义还原成可读文本，避免模型跟着模仿。
 
 ### v1.0.2
 
