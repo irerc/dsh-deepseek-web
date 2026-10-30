@@ -1,6 +1,9 @@
 # dsh-deepseek-web
 
-把 **chat.deepseek.com 网页版** 包成 OpenAI 兼容接口的 DeepSeek Harness 插件。
+[![GitHub stars](https://img.shields.io/github/stars/wsxuyue/dsh-deepseek-web?style=social)](https://github.com/wsxuyue/dsh-deepseek-web/stargazers)
+[![Release](https://img.shields.io/github/v/release/wsxuyue/dsh-deepseek-web)](https://github.com/wsxuyue/dsh-deepseek-web/releases/latest)
+
+把 **chat.deepseek.com 网页版** 包成 OpenAI 兼容接口的 DeepSeek Harness 插件。如果它帮你省下了 API 费用，欢迎点个 **Star** ⭐
 
 - **不需要浏览器**：Node 直连网页接口（PoW 用站点自带的 wasm 在本地算），因此在 Android/proot 容器里也能跑。
 - **多账号**：轮询 + 429 冷却 + 401 自动切换，设置界面可增删。
