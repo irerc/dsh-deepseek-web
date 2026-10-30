@@ -420,9 +420,6 @@ async function handleChat(req, res) {
 
   const lastUser = [...messages].reverse().find((m) => m.role === 'user');
   const toolDoc = renderTools(tools);
-  if (process.env.DSW_DUMP_PROMPT) {
-    try { fs.writeFileSync(process.env.DSW_DUMP_PROMPT, '') ; } catch {}
-  }
 
   let continuing = Boolean(prev?.sessionId);
   let reason = 'new';
