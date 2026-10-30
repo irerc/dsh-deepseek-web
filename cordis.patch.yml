@@ -13,6 +13,10 @@
         api: openai-completions
         baseURL: http://127.0.0.1:18081/v1
         apiKeyEnv: DEEPSEEK_WEB_API_KEY
+        # 本地网关不校验密钥；显式带一个 authorization 头，pi-ai 就不会因缺少 API key 报错，
+        # 新设备安装后无需任何密钥即可使用。
+        headers:
+          authorization: Bearer dsh-deepseek-web
         defaultContextWindow: 131072
         defaultMaxTokens: 32768
         models:

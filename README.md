@@ -25,6 +25,8 @@ https://github.com/wsxuyue/dsh-deepseek-web
 https://github.com/wsxuyue/dsh-deepseek-web/releases/latest/download/dsh-deepseek-web-1.0.0.tgz
 ```
 
+**不需要任何 API key**：插件自带 provider 配置与本地网关（`127.0.0.1:18081`），装好即用。
+
 安装后**重启 DSH**，设置里会出现「DeepSeek 网页版」，模型列表会多出两个模型：
 
 - `DeepSeek-V4(网页版·快速)` → `deepseek-chat`
