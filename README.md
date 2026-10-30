@@ -24,7 +24,7 @@ git+https://gh-proxy.com/https://github.com/wsxuyue/dsh-deepseek-web.git
 **② 发行版压缩包（镜像，最快）**
 
 ```
-https://gh-proxy.com/https://github.com/wsxuyue/dsh-deepseek-web/releases/latest/download/dsh-deepseek-web-1.0.3.tgz
+https://gh-proxy.com/https://github.com/wsxuyue/dsh-deepseek-web/releases/latest/download/dsh-deepseek-web-1.0.4.tgz
 ```
 
 **③ 仓库页（镜像浏览）**
@@ -36,7 +36,7 @@ https://gh-proxy.com/https://github.com/wsxuyue/dsh-deepseek-web
 > 镜像不可用时，把上面链接里的 `https://gh-proxy.com/` 去掉即可直连 GitHub（官方速度可能较慢）：
 >
 > - 插件 spec：`https://github.com/wsxuyue/dsh-deepseek-web`
-> - 压缩包：`https://github.com/wsxuyue/dsh-deepseek-web/releases/latest/download/dsh-deepseek-web-1.0.3.tgz`
+> - 压缩包：`https://github.com/wsxuyue/dsh-deepseek-web/releases/latest/download/dsh-deepseek-web-1.0.4.tgz`
 
 **不需要任何 API key**：插件自带 provider 配置与本地网关（`127.0.0.1:18081`），装好即用。
 
@@ -131,6 +131,14 @@ bin/cli.mjs           login/accounts/start/stop/status/doctor
 MIT License
 
 ## 更新日志
+
+### v1.0.4
+
+- **行为对齐官方 API**：同一段对话能复用网页会话时只补「网页会话里还没有的那部分」（省 token、命中缓存）；一旦历史对不上（编辑/压缩/换会话），整段重发 —— 效果与无状态 API 一致。
+- **工具参数校验与修补**：DSH 的工具会拒收缺必填参数的调用，模型收到报错后会反复重试坏调用（截图里的 `missing required property "description"` 循环）。
+  - `description` 缺失时由 `command` 自动推导补全；
+  - 其他必填缺失或参数不是合法 JSON 时丢弃该调用，并回一句「参数不完整，请补全重试」，不再把坏调用交给工具层。
+- **工具说明标注「必填：…」**，并在协议里强调缺参数会被拒绝。
 
 ### v1.0.3
 

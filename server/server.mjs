@@ -252,7 +252,9 @@ function renderTools(tools, mode = 'full') {
       const props = Object.keys(f.parameters.properties);
       params = '｜参数 ' + props.join(', ');
     }
-    lines.push('- ' + f.name + '：' + desc + params);
+    const req = Array.isArray(f?.parameters?.required) ? f.parameters.required : [];
+    const reqLine = req.length ? '｜必填：' + req.join(', ') : '';
+    lines.push('- ' + f.name + '：' + desc + reqLine + params);
   }
   if (!lines.length) return '';
   const hint =
@@ -264,7 +266,8 @@ function renderTools(tools, mode = 'full') {
         '工具执行完我会把结果贴回给你（以「工具执行完了」开头），你据此继续。不需要工具时正常回答。\n' +
         '需要用户做选择/补充信息时，调用提问类工具（如 ask_user_question），不要只在正文里问。\n' +
         '正文请使用真实换行和普通 Markdown，不要输出 JSON 转义写法（例如不要在正文里写 \\n）。\n' +
-        '工具参数里的长文本要分块：单次写入控制在 2000 字左右，不要一次传入超长内容（会被上游截断）。\n';
+        '工具参数里的长文本要分块：单次写入控制在 2000 字左右，不要一次传入超长内容（会被上游截断）。\n' +
+        '参数必须写全每个「必填」字段（例如 bash 需要 command 与 description），缺参数会被工具层直接拒绝。\n';
   return hint + lines.join('\n');
 }
 
@@ -475,6 +478,9 @@ async function handleChat(req, res) {
     }
   }
 
+  // 语义对齐官方 API：客户端每次给的就是完整 messages[]，我们照它回答。
+  // 同一段对话能复用网页会话时，只补「网页会话里还没有的那部分」（省 token、命中缓存）；
+  // 一旦历史对不上（编辑/压缩/换会话），就整段重发，效果与无状态 API 完全一致。
   let prompt;
   if (continuing) {
     // 只发网页会话里还没有的部分；assistant 是模型自己的输出，不必复述
@@ -772,7 +778,32 @@ async function handleChat(req, res) {
     return true;
   });
   if (uniqCalls.length !== calls.length) log('[chat] dropped ' + (calls.length - uniqCalls.length) + ' duplicate tool call(s)');
-  const toolCalls = uniqCalls.map((c, i) => ({ id: 'call_' + id.slice(8, 18) + i, type: 'function', function: { name: c.name, arguments: c.arguments } }));
+
+  // 参数校验：DSH 的工具会拒收缺少必填参数的调用，模型收到报错后会反复重试同一个坏调用。
+  // 这里先做能做的修补（description 可由 command 推导），修不好就丢掉，并给用户一句说明。
+  const schemas = new Map();
+  for (const t of tools) {
+    const f = t?.function || t;
+    if (f?.name) schemas.set(f.name, f.parameters || {});
+  }
+  const safeCalls = [];
+  const droppedCalls = [];
+  for (const c of uniqCalls) {
+    const r = repairToolArgs(c, schemas);
+    if (r.ok) safeCalls.push({ name: c.name, arguments: JSON.stringify(r.args) });
+    else {
+      droppedCalls.push(c.name + '（' + r.reason + '）');
+      log('[tool] invalid call dropped: ' + c.name + ' — ' + r.reason);
+    }
+  }
+  if (droppedCalls.length && !textOut.trim()) {
+    textOut = '（这一轮的工具调用参数不完整，已忽略：' + droppedCalls.join('；') + '。请补全参数后重试。）';
+    if (stream) {
+      if (!headersSent) sendChunk({ role: 'assistant', content: '' });
+      sendChunk({ content: textOut });
+    }
+  }
+  const toolCalls = safeCalls.map((c, i) => ({ id: 'call_' + id.slice(8, 18) + i, type: 'function', function: { name: c.name, arguments: c.arguments } }));
 
   if (stream) {
     if (toolCalls.length) {
@@ -809,6 +840,29 @@ async function handleChat(req, res) {
 
 // --------------------------------------------------------------------- helpers
 
+/** 按工具 schema 校验/修补参数：缺 description 时用 command 推导，其余缺必填则判为无效。 */
+function repairToolArgs(call, schemas) {
+  const schema = schemas.get(call.name);
+  let args;
+  try {
+    args = JSON.parse(call.arguments || '{}');
+  } catch {
+    return { ok: false, reason: '参数不是合法 JSON' };
+  }
+  if (!args || typeof args !== 'object') return { ok: false, reason: '参数不是对象' };
+  if (!schema) return { ok: true, args };
+  const required = Array.isArray(schema.required) ? schema.required : [];
+  const miss = () => required.filter((k) => args[k] === undefined || args[k] === null || args[k] === '');
+  for (const k of miss()) {
+    if (k === 'description' && typeof args.command === 'string' && args.command.trim()) {
+      args.description = args.command.trim().slice(0, 80);
+    }
+  }
+  const still = miss();
+  if (still.length) return { ok: false, reason: '缺少必填参数 ' + still.join(', ') };
+  return { ok: true, args };
+}
+
 function withTimeout(promise, ms, tag) {
   return Promise.race([promise, new Promise((_, rej) => setTimeout(() => rej(new Error(tag + ' timeout after ' + ms + 'ms')), ms))]);
 }
@@ -834,6 +888,12 @@ function json(res, status, obj) {
 // 自检：DSW_SELFTEST_PROMPT=<json 文件> 时只构造 prompt 并打印统计，不监听端口。
 if (process.env.DSW_SELFTEST_PROMPT) {
   const spec = JSON.parse(fs.readFileSync(process.env.DSW_SELFTEST_PROMPT, 'utf8'));
+  if (spec.repair) {
+    const schemas = new Map();
+    for (const t of spec.tools || []) { const f = t.function || t; if (f?.name) schemas.set(f.name, f.parameters || {}); }
+    for (const c of spec.repair) console.log(JSON.stringify(c, null, 0), '→', JSON.stringify(repairToolArgs(c, schemas)));
+    process.exit(0);
+  }
   const prompt = buildNewChatPrompt(spec.messages || [], spec.tools || []);
   const doc = renderTools(spec.tools || [], 'full');
   console.log(JSON.stringify({
