@@ -13,17 +13,30 @@
 
 ## 安装（新设备一条命令/粘贴链接即可用）
 
-DSH 设置 →「插件」→ 安装插件，粘贴下面的仓库链接（或在终端执行 `dsh plugin --profile web add <链接>`）：
+中国大陆推荐走 **gh-proxy 镜像**，下面三条任选其一：
+
+**① 粘贴到 DSH「插件 → 安装插件」（镜像）**
 
 ```
-https://github.com/wsxuyue/dsh-deepseek-web
+git+https://gh-proxy.com/https://github.com/wsxuyue/dsh-deepseek-web.git
 ```
 
-也可以直接用发行版压缩包：
+**② 发行版压缩包（镜像，最快）**
 
 ```
-https://github.com/wsxuyue/dsh-deepseek-web/releases/latest/download/dsh-deepseek-web-1.0.0.tgz
+https://gh-proxy.com/https://github.com/wsxuyue/dsh-deepseek-web/releases/latest/download/dsh-deepseek-web-1.0.0.tgz
 ```
+
+**③ 仓库页（镜像浏览）**
+
+```
+https://gh-proxy.com/https://github.com/wsxuyue/dsh-deepseek-web
+```
+
+> 镜像不可用时，把上面链接里的 `https://gh-proxy.com/` 去掉即可直连 GitHub（官方速度可能较慢）：
+>
+> - 插件 spec：`https://github.com/wsxuyue/dsh-deepseek-web`
+> - 压缩包：`https://github.com/wsxuyue/dsh-deepseek-web/releases/latest/download/dsh-deepseek-web-1.0.0.tgz`
 
 **不需要任何 API key**：插件自带 provider 配置与本地网关（`127.0.0.1:18081`），装好即用。
 
