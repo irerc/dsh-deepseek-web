@@ -56,216 +56,9 @@ const CDN_PREFIX = '/chat/';
 const UA =
   'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36';
 
-const INJECT = `
-<script>
-(function () {
-  var posted = false;
-  var _fetch = window.fetch;
-  if (_fetch) {
-    window.fetch = function (input, init) {
-      var url = typeof input === 'string' ? input : (input && input.url) || '';
-      var t0 = Date.now();
-      var slow = setTimeout(function () { tip('请求超时 15s 仍未返回：' + url); }, 15000);
-      // 站点新版本把 token 存进 IndexedDB，光看 localStorage 抓不到。
-      // 这里直接从网络层捞：请求头里的 Authorization Bearer，或响应 JSON 里的 user.token。
-      try {
-        var h = (init && init.headers) || (input && input.headers) || null;
-        if (h) {
-          var auth = '';
-          if (typeof h.get === 'function') auth = h.get('authorization') || '';
-          else if (Array.isArray(h)) { for (var i = 0; i < h.length; i++) { if (String(h[i][0]).toLowerCase() === 'authorization') auth = h[i][1]; } }
-          else { for (var k in h) { if (String(k).toLowerCase() === 'authorization') auth = h[k]; } }
-          var m = /Bearer\s+([A-Za-z0-9+/=_-]{20,})/.exec(String(auth || ''));
-          if (m) report(m[1]);
-        }
-      } catch (e) {}
-      return _fetch.call(this, input, init).then(function (r) {
-        clearTimeout(slow);
-        if (!r.ok) tip('API ' + r.status + ' ' + url);
-        try {
-          if (/users\/(login|mfa\/check_verification_code)/.test(url)) {
-            r.clone().text().then(function (t) {
-              var mm = /"token"\s*:\s*"([A-Za-z0-9+/=_-]{20,})"/.exec(String(t || ''));
-              if (mm) report(mm[1]);
-            }, function () {});
-          }
-        } catch (e) {}
-        // 登录/注册这类接口：把上游真实原因摊开，方便判断是风控、验证码过期还是字段问题
-        if (/\/api\/v0\/users\//.test(url)) {
-          try {
-            r.clone().text().then(function (t) {
-              if (!t) return;
-              if (t.indexOf('"code":0') < 0 || /"biz_code":[1-9]/.test(t)) {
-                tip('服务端返回（' + url.split('?')[0] + '）：' + String(t).slice(0, 300));
-              }
-            }, function () {});
-          } catch (e) {}
-        }
-        return r;
-      }, function (e) {
-        clearTimeout(slow);
-        tip('网络失败 ' + url + ' · ' + (e && e.message ? e.message : e));
-        throw e;
-      });
-    };
-  }
-  var _err = console.error;
-  console.error = function () {
-    try { tip('console.error: ' + Array.prototype.map.call(arguments, function (a) { return a && a.message ? a.message : String(a); }).join(' ')); } catch (e) {}
-    return _err.apply(console, arguments);
-  };
-  var _open = XMLHttpRequest.prototype.open;
-  var _send = XMLHttpRequest.prototype.send;
-  XMLHttpRequest.prototype.open = function (m, u) { this.__u = u; return _open.apply(this, arguments); };
-  var _setHeader = XMLHttpRequest.prototype.setRequestHeader;
-  XMLHttpRequest.prototype.setRequestHeader = function (k, v) {
-    try {
-      if (String(k).toLowerCase() === 'authorization') {
-        var mm = /Bearer\s+([A-Za-z0-9+/=_-]{20,})/.exec(String(v || ''));
-        if (mm) report(mm[1]);
-      }
-    } catch (e) {}
-    return _setHeader.apply(this, arguments);
-  };
-  XMLHttpRequest.prototype.send = function () {
-    var xhr = this;
-    xhr.addEventListener('loadend', function () {
-      if (xhr.status === 0 || xhr.status >= 400) tip('XHR ' + xhr.status + ' ' + xhr.__u);
-      try {
-        var t = xhr.responseText || '';
-        var mm = /"token"\s*:\s*"([A-Za-z0-9+/=_-]{20,})"/.exec(t);
-        if (mm && /users\/(login|mfa)/.test(xhr.__u || '')) report(mm[1]);
-      } catch (e) {}
-    });
-    return _send.apply(this, arguments);
-  };
-  function status() {
-    var el = document.getElementById('__dsweb_status');
-    if (!el) {
-      el = document.createElement('div');
-      el.id = '__dsweb_status';
-      el.style.cssText = 'position:fixed;left:6px;top:6px;z-index:2147483647;font:11px monospace;background:rgba(0,0,0,.8);color:#7bd88f;padding:6px 8px;border-radius:6px;max-width:92vw;white-space:pre-wrap';
-      document.body.appendChild(el);
-    }
-    var root = document.getElementById('root');
-    var scripts = Array.prototype.map.call(document.scripts, function (s) {
-      return (s.src ? s.src.split('/').pop() : 'inline').slice(0, 26);
-    });
-    var rootLen = root ? root.innerHTML.length : -1;
-    el.textContent = 'ds-web [__DSW_REGION__] | ' + document.readyState + ' | root子=' + (root ? root.children.length : -1) + ' len=' + rootLen +
-      ' | 脚本=' + scripts.length + ' 已载=' + (window.__dsLoaded || 0) + ' 失败=' + (window.__dsErr || 0) +
-      (window.__dsErrSrc ? ' [' + String(window.__dsErrSrc).split('/').pop() + ']' : '') + ' | ' + location.pathname;
-  }
-  // 让浏览器的密码管理器能识别登录表单：补 autocomplete/name，并包成可识别的字段
-  function tagLoginForm() {
-    var pass = document.querySelector('input[type=password]');
-    if (!pass) return;
-    if (pass.getAttribute('autocomplete') !== 'current-password') {
-      pass.setAttribute('autocomplete', 'current-password');
-      pass.setAttribute('name', 'password');
-      pass.setAttribute('id', pass.id || 'dsweb-password');
-    }
-    var scope = pass.closest('form') || document.body;
-    var user = scope.querySelector('input[type=email], input[type=tel], input[type=text]');
-    if (user && user !== pass && user.getAttribute('autocomplete') !== 'username') {
-      user.setAttribute('autocomplete', 'username');
-      user.setAttribute('name', 'username');
-      user.setAttribute('id', user.id || 'dsweb-username');
-    }
-  }
-  document.addEventListener('DOMContentLoaded', tagLoginForm);
-  setInterval(tagLoginForm, 1200);
-
-  document.addEventListener('DOMContentLoaded', status);
-  setInterval(status, 1500);
-  setTimeout(function () {
-    var root = document.getElementById('root');
-    var n = root ? root.children.length : -1;
-    if (n <= 0) tip('应用还没有渲染（root 子节点=' + n + '）');
-  }, 8000);
-  function tip(msg) {
-    try { console.log('[dsweb]', msg); } catch (e) {}
-    var el = document.getElementById('__dsweb_tip');
-    if (!el) { el = document.createElement('div'); el.id = '__dsweb_tip'; el.style.cssText = 'position:fixed;left:8px;bottom:8px;right:8px;z-index:99998;font:12px monospace;background:rgba(0,0,0,.82);color:#ffd479;padding:8px;border-radius:8px;max-height:35vh;overflow:auto;white-space:pre-wrap'; document.body.appendChild(el); }
-    el.textContent += (el.textContent ? '\\n' : '') + msg;
-  }
-  window.addEventListener('error', function (e) {
-    var t = e && e.target;
-    if (t && (t.src || t.href)) tip('资源加载失败: ' + (t.src || t.href));
-    else tip('JS 错误: ' + (e.message || '') + (e.filename ? ' @ ' + e.filename + ':' + e.lineno : ''));
-  }, true);
-  window.addEventListener('unhandledrejection', function (e) {
-    tip('Promise 失败: ' + (e.reason && (e.reason.message || e.reason)));
-  });
-  function report(token) {
-    if (posted || !token) return;
-    posted = true;
-    fetch('__DSH_REPORT__', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        token: token,
-        label: '浏览器登录',
-        sid: (document.cookie.match(/(?:^|;\s*)dsweb_sid=([^;]+)/) || [])[1] || ''
-      })
-    }).then(function (r) { return r.json(); }).then(function (d) {
-      var el = document.getElementById('__dsweb_tip');
-      if (el) el.textContent = d && d.ok ? '已保存到 DSH 插件，可以关闭本页了 ✓' : '保存失败：' + JSON.stringify(d);
-      // 登录成功后做一次真实跳转，方便浏览器密码管理器触发“保存密码”提示
-      if (d && d.ok) setTimeout(function () { if (location.pathname !== '/') location.href = '/'; }, 1200);
-    }).catch(function (e) {
-      posted = false;
-      var el = document.getElementById('__dsweb_tip');
-      if (el) el.textContent = '回传失败：' + e.message;
-    });
-  }
-  function poll() {
-    try {
-      var raw = localStorage.getItem('userToken');
-      if (raw) {
-        var token = '';
-        try { token = JSON.parse(raw).value || ''; } catch (e) { token = ''; }
-        if (token) report(token);
-      }
-    } catch (e) {}
-    setTimeout(poll, 1500);
-  }
-  poll();
-})();
-</script>
-<div id="__dsweb_tip" style="position:fixed;left:8px;bottom:8px;z-index:99999;font:12px sans-serif;background:rgba(0,0,0,.75);color:#fff;padding:6px 10px;border-radius:8px;pointer-events:none">登录后会自动保存到 DSH，无需复制 token</div>
-<div style="position:fixed;right:8px;top:64px;z-index:99999;display:flex;flex-direction:column;gap:6px;align-items:flex-end">
-  <a id="__dsweb_signup" href="/sign_up" style="font:12px sans-serif;background:rgba(80,140,255,.22);color:#cfe0ff;border:1px solid rgba(120,170,255,.5);padding:6px 10px;border-radius:8px;text-decoration:none">没有账号？邮箱注册</a>
-  <button onclick="(function(){try{localStorage.removeItem('userToken');localStorage.clear();}catch(e){};alert('已退出本页登录（插件里的 token 不受影响）');location.href='/sign_in';})()" style="font:12px sans-serif;background:rgba(255,255,255,.12);color:#fff;border:1px solid rgba(255,255,255,.25);padding:6px 10px;border-radius:8px">退出本页登录</button>
-</div>
-<script>
-(function () {
-  var hint = null;
-  function syncAuthUi() {
-    try {
-      var onSignUp = location.pathname.indexOf('/sign_up') === 0;
-      var a = document.getElementById('__dsweb_signup');
-      if (a) a.style.display = onSignUp ? 'none' : '';
-      // 注册页会做人机验证，本地反代域（127.0.0.1）过不了验证时按钮会一直转圈。
-      // 这里给一条可用替代路径：登录页用邮箱验证码，首次登录即自动创建账号。
-      if (onSignUp && !hint) {
-        hint = document.createElement('div');
-        hint.style.cssText = 'position:fixed;left:8px;top:64px;right:120px;z-index:99997;font:12px sans-serif;background:rgba(255,180,60,.14);color:#ffd479;border:1px solid rgba(255,180,60,.45);padding:8px 10px;border-radius:8px;line-height:1.6';
-        hint.innerHTML = '注册按钮一直转圈？多半是站点人机验证无法在本地反代域名下完成。<br>' +
-          '请点「返回登录」，用 <b>邮箱验证码</b> 登录：第一次登录会自动创建账号，效果与注册相同。';
-        document.body.appendChild(hint);
-      } else if (!onSignUp && hint) {
-        hint.remove();
-        hint = null;
-      }
-    } catch (e) {}
-  }
-  syncAuthUi();
-  window.addEventListener('popstate', syncAuthUi);
-  setInterval(syncAuthUi, 1200);
-})();
-</script>
-`;
+// 注入脚本放在独立文件里：写正则时不用考虑模板字符串的转义问题
+// （曾经因为在模板字符串里写 /users\/(login|mfa)/ 被吃掉反斜杠，整段注入脚本语法错误 → 完全抓不到 token）
+const INJECT = fs.readFileSync(new URL('./inject.html', import.meta.url), 'utf8');
 
 function filterRequestHeaders(headers) {
   const out = {};
@@ -355,6 +148,22 @@ function writeAsset(url, buf) {
     fs.writeFileSync(assetPath(url), buf);
   } catch {}
 }
+function challengePage() {
+  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>站点风控拦截</title><style>body{background:#111;color:#eee;font:14px/1.7 system-ui,sans-serif;padding:24px;max-width:640px;margin:0 auto}
+h2{font-size:17px}code{background:#222;padding:1px 5px;border-radius:4px}a{color:#6cf}p{color:#bbb}</style></head><body>
+<h2>这一步被 DeepSeek 的风控拦住了</h2>
+<p>返回的是 AWS WAF 的人机验证页（202 challenge），不是你操作错了。常见于短时间反复刷新。</p>
+<p>处理办法：</p>
+<ul>
+<li>等 30 秒，点下面的按钮重试；</li>
+<li>还不行就关掉本页，回插件里用 <b>邮箱 + 密码登录</b>（这条路不经过浏览器，不受这里影响）。</li>
+</ul>
+<p><a href="/" style="display:inline-block;margin-top:8px;padding:8px 14px;border:1px solid #4a7;border-radius:8px;text-decoration:none;color:#9e9">等 30 秒后重试</a></p>
+<script>setTimeout(function(){location.href='/';},30000);</script>
+</body></html>`;
+}
+
 function fetchUpstream(target, method, headers, body, attempts = 3, timeoutMs = 12000) {
   let lastError = null;
   const run = (n) =>
@@ -501,6 +310,19 @@ export function startLoginProxy({ port = 18090, reportUrl }) {
         const chunks = [];
         up.on('data', (c) => chunks.push(c));
         up.on('end', () => {
+          const wafChallenge = up.statusCode === 202 || Boolean(up.headers['x-amzn-waf-action']);
+          if (wafChallenge) {
+            // 站点风控要求「人机验证」：等一两秒重试，通常第二次就放行了。
+            if (attempt < 2) {
+              logLine('WAF_CHALLENGE(' + attempt + ') ' + req.url + ' 稍后重试');
+              setTimeout(() => send(attempt + 1), 1500);
+              return;
+            }
+            logLine('WAF_BLOCKED ' + req.url);
+            res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+            res.end(challengePage());
+            return;
+          }
           let html = Buffer.concat(chunks).toString('utf8');
           // 站点资源改走本代理，避免跨域与 CSP 干扰
           html = html.split('https://fe-static.deepseek.com/chat/').join('/cdn/');
@@ -513,7 +335,7 @@ export function startLoginProxy({ port = 18090, reportUrl }) {
             return '<script' + pre + ' data-dsweb="' + src.split('/').pop() + '" onload="window.__dsLoaded=(window.__dsLoaded||0)+1" onerror="window.__dsErr=(window.__dsErr||0)+1;window.__dsErrSrc=this.src" src="' + src + '"';
           });
           const regionLabel = (loadConfig().loginRegion === 'global' ? '海外' : loadConfig().loginRegion === 'cn' ? '国内' : '自动') + '·' + siteHost();
-          const snippet = INJECT.replace('__DSH_REPORT__', reportUrl).replace('__DSW_REGION__', regionLabel);
+          const snippet = INJECT.split('__DSH_REPORT__').join(reportUrl).split('__DSW_REGION__').join(regionLabel);
           html = html.includes('</body>') ? html.replace('</body>', snippet + '</body>') : html + snippet;
           res.writeHead(up.statusCode || 200, { ...headers, 'content-type': 'text/html; charset=utf-8' });
           res.end(html);

@@ -1,0 +1,368 @@
+<script>
+/*
+ * 注入到登录代理页面的脚本（独立文件，避免在模板字符串里写正则时反斜杠被吃掉）。
+ * 占位符：__DSH_REPORT__ 收 token 的插件地址；__DSW_REGION__ 线路标签。
+ * 目标：用户在这个页面里怎么登录都行（密码 / 验证码 / 已登录状态），
+ *       脚本把 token 从「网络层 → localStorage → Cookie → IndexedDB」四个来源里捞出来回传。
+ */
+(function () {
+  var REPORT = '__DSH_REPORT__';
+  var REGION = '__DSW_REGION__';
+  var sent = {};
+  var TOKEN_RE = /^[A-Za-z0-9+/=_-]{30,300}$/;
+
+  function looksToken(v) {
+    return typeof v === 'string' && TOKEN_RE.test(v) && v.length >= 30;
+  }
+  function sidCookie() {
+    var m = /(?:^|;\s*)dsweb_sid=([^;]+)/.exec(document.cookie || '');
+    return m ? m[1] : '';
+  }
+
+  function report(token, source) {
+    if (!looksToken(token) || sent[token]) return;
+    sent[token] = true;
+    tip('捕获到 token（' + source + '），正在保存…');
+    fetch(REPORT, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ token: token, label: '浏览器登录', sid: sidCookie(), source: source })
+    }).then(function (r) { return r.json(); }).then(function (d) {
+      if (d && d.ok) {
+        tip('已保存到 DSH 插件 ✓（来源 ' + source + '），可以关闭本页了');
+        var btn = document.getElementById('__dsweb_scan');
+        if (btn) { btn.textContent = '已保存 ✓'; btn.disabled = true; }
+        setTimeout(function () { if (location.pathname !== '/') location.href = '/'; }, 1200);
+      } else {
+        sent[token] = false;
+        tip('保存失败：' + ((d && d.message) || JSON.stringify(d)));
+      }
+    }).catch(function (e) {
+      sent[token] = false;
+      tip('回传失败：' + (e && e.message ? e.message : e));
+    });
+  }
+
+  /* ---------- 1. 网络层：请求头 / 登录响应 ---------- */
+  var _fetch = window.fetch;
+  if (_fetch) {
+    window.fetch = function (input, init) {
+      var url = typeof input === 'string' ? input : ((input && input.url) || '');
+      var slow = setTimeout(function () { tip('请求超时 15s 仍未返回：' + url); }, 15000);
+      try {
+        var h = (init && init.headers) || (input && input.headers) || null;
+        if (h) {
+          var auth = '';
+          if (typeof h.get === 'function') auth = h.get('authorization') || '';
+          else if (Array.isArray(h)) { for (var i = 0; i < h.length; i++) { if (String(h[i][0]).toLowerCase() === 'authorization') auth = h[i][1]; } }
+          else { for (var k in h) { if (String(k).toLowerCase() === 'authorization') auth = h[k]; } }
+          var m = /Bearer\s+([A-Za-z0-9+/=_-]{20,})/.exec(String(auth || ''));
+          if (m) report(m[1], '请求头');
+        }
+      } catch (e) {}
+      return _fetch.call(this, input, init).then(function (r) {
+        clearTimeout(slow);
+        if (!r.ok) tip('API ' + r.status + ' ' + url);
+        try {
+          if (/\/api\/v0\/users\//.test(url)) {
+            r.clone().text().then(function (t) {
+              var mm = /"token"\s*:\s*"([A-Za-z0-9+/=_-]{20,})"/.exec(String(t || ''));
+              if (mm) report(mm[1], '登录响应');
+              // 把上游真实原因摊开，方便判断是风控、验证码过期还是字段问题
+              if (t && (t.indexOf('"code":0') < 0 || /"biz_code":[1-9]/.test(t))) {
+                tip('服务端返回（' + url.split('?')[0] + '）：' + String(t).slice(0, 300));
+              }
+            }, function () {});
+          }
+        } catch (e) {}
+        return r;
+      }, function (e) {
+        clearTimeout(slow);
+        tip('网络失败 ' + url + ' · ' + (e && e.message ? e.message : e));
+        throw e;
+      });
+    };
+  }
+
+  var _open = XMLHttpRequest.prototype.open;
+  var _send = XMLHttpRequest.prototype.send;
+  var _setHeader = XMLHttpRequest.prototype.setRequestHeader;
+  XMLHttpRequest.prototype.open = function (m, u) { this.__u = u; return _open.apply(this, arguments); };
+  XMLHttpRequest.prototype.setRequestHeader = function (k, v) {
+    try {
+      if (String(k).toLowerCase() === 'authorization') {
+        var mm = /Bearer\s+([A-Za-z0-9+/=_-]{20,})/.exec(String(v || ''));
+        if (mm) report(mm[1], '请求头');
+      }
+    } catch (e) {}
+    return _setHeader.apply(this, arguments);
+  };
+  XMLHttpRequest.prototype.send = function () {
+    var xhr = this;
+    xhr.addEventListener('loadend', function () {
+      if (xhr.status === 0 || xhr.status >= 400) tip('XHR ' + xhr.status + ' ' + xhr.__u);
+      try {
+        var t = xhr.responseText || '';
+        if (/\/api\/v0\/users\//.test(xhr.__u || '')) {
+          var mm = /"token"\s*:\s*"([A-Za-z0-9+/=_-]{20,})"/.exec(t);
+          if (mm) report(mm[1], '登录响应');
+        }
+      } catch (e) {}
+    });
+    return _send.apply(this, arguments);
+  };
+
+  /* ---------- 2. localStorage / Cookie ---------- */
+  function tokenFromValue(v) {
+    if (!v) return '';
+    if (typeof v === 'string' && v.length > 2 && v.charAt(0) !== '{' && v.charAt(0) !== '[') {
+      return looksToken(v) ? v : '';
+    }
+    try {
+      var o = JSON.parse(v);
+      if (o && typeof o === 'object') {
+        if (looksToken(o.value)) return o.value;
+        if (looksToken(o.token)) return o.token;
+        if (o.value && typeof o.value === 'object' && looksToken(o.value.token)) return o.value.token;
+      }
+    } catch (e) {}
+    return '';
+  }
+  function scanStorage() {
+    var found = '';
+    try {
+      for (var i = 0; i < localStorage.length; i++) {
+        var k = localStorage.key(i) || '';
+        var t = tokenFromValue(localStorage.getItem(k));
+        if (t) { report(t, 'localStorage');
+          if (!found) found = t; }
+      }
+    } catch (e) {}
+    try {
+      var parts = (document.cookie || '').split(';');
+      for (var j = 0; j < parts.length; j++) {
+        var eq = parts[j].indexOf('=');
+        if (eq < 0) continue;
+        var name = parts[j].slice(0, eq).trim();
+        var val = decodeURIComponent(parts[j].slice(eq + 1).trim());
+        if (looksToken(val) && /token|auth|session/i.test(name)) {
+          report(val, 'cookie:' + name);
+          if (!found) found = val;
+        }
+      }
+    } catch (e) {}
+    return found;
+  }
+
+  /* ---------- 3. IndexedDB（站点新版可能把登录态搬到这里） ---------- */
+  function deepScan(node, depth, path, hit) {
+    if (depth > 4 || !node || hit.done) return;
+    if (typeof node === 'string') {
+      if (looksToken(node) && /token|auth|login|session|user/i.test(path)) {
+        hit.done = true;
+        hit.value = node;
+      }
+      return;
+    }
+    if (Array.isArray(node)) {
+      for (var i = 0; i < node.length && i < 40; i++) deepScan(node[i], depth + 1, path, hit);
+      return;
+    }
+    if (typeof node === 'object') {
+      var keys = Object.keys(node);
+      for (var k = 0; k < keys.length && k < 40; k++) {
+        deepScan(node[keys[k]], depth + 1, path + '.' + keys[k], hit);
+        if (hit.done) return;
+      }
+    }
+  }
+  function scanIdb() {
+    if (!window.indexedDB || !indexedDB.databases) return;
+    Promise.resolve(indexedDB.databases()).then(function (list) {
+      (list || []).forEach(function (info) {
+        if (!info || !info.name) return;
+        try {
+          var req = indexedDB.open(info.name);
+          req.onerror = function () {};
+          req.onblocked = function () {};
+          req.onsuccess = function () {
+            var db = req.result;
+            var names = Array.prototype.slice.call(db.objectStoreNames || []);
+            if (!names.length) { try { db.close(); } catch (e) {} return; }
+            try {
+              var tx = db.transaction(names, 'readonly');
+              tx.oncomplete = function () { try { db.close(); } catch (e) {} };
+              names.forEach(function (n) {
+                try {
+                  var all = tx.objectStore(n).getAll();
+                  all.onsuccess = function () {
+                    var hit = { done: false, value: '' };
+                    deepScan(all.result, 0, info.name + '/' + n, hit);
+                    if (hit.done) report(hit.value, 'IndexedDB');
+                  };
+                } catch (e) {}
+              });
+            } catch (e) { try { db.close(); } catch (_e) {} }
+          };
+        } catch (e) {}
+      });
+    }).catch(function () {});
+  }
+
+  /* ---------- 4. 诊断：抓不到时把页面存储清单回传，便于排查 ---------- */
+  function diag(reason) {
+    var d = { reason: reason, path: location.pathname, ua: navigator.userAgent.slice(0, 80), storage: [], cookie: [], idb: [] };
+    try {
+      for (var i = 0; i < localStorage.length; i++) {
+        var k = localStorage.key(i) || '';
+        d.storage.push(k + '=' + String(localStorage.getItem(k) || '').slice(0, 80));
+      }
+    } catch (e) {}
+    try {
+      var parts = (document.cookie || '').split(';');
+      for (var j = 0; j < parts.length; j++) {
+        var eq = parts[j].indexOf('=');
+        if (eq > 0) d.cookie.push(parts[j].slice(0, eq).trim());
+      }
+    } catch (e) {}
+    if (window.indexedDB && indexedDB.databases) {
+      try {
+        Promise.resolve(indexedDB.databases()).then(function (list) {
+          d.idb = (list || []).map(function (x) { return x && x.name; });
+          sendDiag(d);
+        }).catch(function () { sendDiag(d); });
+        return;
+      } catch (e) {}
+    }
+    sendDiag(d);
+  }
+  function sendDiag(d) {
+    try {
+      fetch(REPORT, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ diag: d, sid: sidCookie() })
+      }).catch(function () {});
+    } catch (e) {}
+  }
+
+  /* ---------- UI ---------- */
+  function status() {
+    var el = document.getElementById('__dsweb_status');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = '__dsweb_status';
+      el.style.cssText = 'position:fixed;left:6px;top:6px;z-index:2147483647;font:11px monospace;background:rgba(0,0,0,.8);color:#7bd88f;padding:6px 8px;border-radius:6px;max-width:92vw;white-space:pre-wrap';
+      document.body.appendChild(el);
+    }
+    var root = document.getElementById('root');
+    el.textContent = 'ds-web [' + REGION + '] | ' + document.readyState + ' | 已载=' + (window.__dsLoaded || 0) +
+      ' 失败=' + (window.__dsErr || 0) + (window.__dsErrSrc ? ' [' + String(window.__dsErrSrc).split('/').pop() + ']' : '') +
+      ' | root子=' + (root ? root.children.length : -1) + ' | ' + location.pathname;
+  }
+  function tip(msg) {
+    try { console.log('[dsweb]', msg); } catch (e) {}
+    var el = document.getElementById('__dsweb_tip');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = '__dsweb_tip';
+      el.style.cssText = 'position:fixed;left:8px;bottom:8px;right:8px;z-index:99998;font:12px monospace;background:rgba(0,0,0,.82);color:#ffd479;padding:8px;border-radius:8px;max-height:35vh;overflow:auto;white-space:pre-wrap';
+      document.body.appendChild(el);
+    }
+    el.textContent = String(msg);
+  }
+
+  // 让浏览器的密码管理器能识别登录表单
+  function tagLoginForm() {
+    var pass = document.querySelector('input[type=password]');
+    if (!pass) return;
+    if (pass.getAttribute('autocomplete') !== 'current-password') {
+      pass.setAttribute('autocomplete', 'current-password');
+      pass.setAttribute('name', 'password');
+      pass.setAttribute('id', pass.id || 'dsweb-password');
+    }
+    var scope = pass.closest('form') || document.body;
+    var user = scope.querySelector('input[type=email], input[type=tel], input[type=text]');
+    if (user && user !== pass && user.getAttribute('autocomplete') !== 'username') {
+      user.setAttribute('autocomplete', 'username');
+      user.setAttribute('name', 'username');
+      user.setAttribute('id', user.id || 'dsweb-username');
+    }
+  }
+
+  // 手动兜底：点一下就把当前页面里能找到的 token 全部试一遍
+  function manualScan() {
+    tip('正在从 localStorage / Cookie / IndexedDB 查找 token…');
+    var found = scanStorage();
+    scanIdb();
+    setTimeout(function () {
+      if (!found) {
+        var any = false;
+        for (var t in sent) { if (sent[t]) any = true; }
+        if (!any) tip('没找到 token。若你还没登录，请先在这个页面登录；若已登录仍不行，请把下面这行发给作者：\\n已登录但未找到 token，路径 ' + location.pathname);
+      }
+    }, 2500);
+  }
+  window.__dswebScan = manualScan;
+
+  document.addEventListener('DOMContentLoaded', function () {
+    status(); tagLoginForm();
+    scanStorage();
+  });
+  var _err = console.error;
+  console.error = function () {
+    try { tip('console.error: ' + Array.prototype.map.call(arguments, function (a) { return a && a.message ? a.message : String(a); }).join(' ')); } catch (e) {}
+    return _err.apply(console, arguments);
+  };
+  window.addEventListener('error', function (e) {
+    var t = e && e.target;
+    if (t && (t.src || t.href)) tip('资源加载失败: ' + (t.src || t.href));
+    else tip('JS 错误: ' + (e.message || '') + (e.filename ? ' @ ' + e.filename + ':' + e.lineno : ''));
+  }, true);
+  window.addEventListener('unhandledrejection', function (e) {
+    tip('Promise 失败: ' + (e.reason && (e.reason.message || e.reason)));
+  });
+
+  setInterval(status, 1500);
+  setInterval(tagLoginForm, 1500);
+  setInterval(function () { scanStorage(); }, 2000);
+  setTimeout(function () { scanStorage(); scanIdb(); }, 1500);
+  setTimeout(function () { scanStorage(); scanIdb(); }, 6000);
+  setTimeout(function () {
+    var none = true;
+    for (var t in sent) { if (sent[t]) none = false; }
+    if (none) diag('no-token-after-12s');
+  }, 12000);
+})();
+</script>
+<div id="__dsweb_tip" style="position:fixed;left:8px;bottom:8px;z-index:99999;font:12px sans-serif;background:rgba(0,0,0,.75);color:#fff;padding:6px 10px;border-radius:8px;pointer-events:none">登录后会自动保存到 DSH，无需复制 token</div>
+<div style="position:fixed;right:8px;top:64px;z-index:99999;display:flex;flex-direction:column;gap:6px;align-items:flex-end">
+  <a id="__dsweb_signup" href="/sign_up" style="font:12px sans-serif;background:rgba(80,140,255,.22);color:#cfe0ff;border:1px solid rgba(120,170,255,.5);padding:6px 10px;border-radius:8px;text-decoration:none">没有账号？邮箱注册</a>
+  <button id="__dsweb_scan" onclick="window.__dswebScan&&window.__dswebScan()" style="font:12px sans-serif;background:rgba(80,200,140,.22);color:#c6f5d8;border:1px solid rgba(90,220,160,.55);padding:6px 10px;border-radius:8px">提取并保存 token</button>
+  <button onclick="(function(){try{localStorage.clear();sessionStorage.clear();}catch(e){};alert('已退出本页登录（插件里的 token 不受影响）');location.href='/sign_in';})()" style="font:12px sans-serif;background:rgba(255,255,255,.12);color:#fff;border:1px solid rgba(255,255,255,.25);padding:6px 10px;border-radius:8px">退出本页登录</button>
+</div>
+<script>
+(function () {
+  var hint = null;
+  function syncAuthUi() {
+    try {
+      var onSignUp = location.pathname.indexOf('/sign_up') === 0;
+      var a = document.getElementById('__dsweb_signup');
+      if (a) a.style.display = onSignUp ? 'none' : '';
+      if (onSignUp && !hint) {
+        hint = document.createElement('div');
+        hint.style.cssText = 'position:fixed;left:8px;top:64px;right:120px;z-index:99997;font:12px sans-serif;background:rgba(255,180,60,.14);color:#ffd479;border:1px solid rgba(255,180,60,.45);padding:8px 10px;border-radius:8px;line-height:1.6';
+        hint.innerHTML = '注册按钮一直转圈？多半是站点人机验证无法在本地反代域名下完成。<br>' +
+          '请点「返回登录」，用 <b>邮箱验证码</b> 登录：第一次登录会自动创建账号，效果与注册相同。';
+        document.body.appendChild(hint);
+      } else if (!onSignUp && hint) {
+        hint.remove();
+        hint = null;
+      }
+    } catch (e) {}
+  }
+  syncAuthUi();
+  window.addEventListener('popstate', syncAuthUi);
+  setInterval(syncAuthUi, 1200);
+})();
+</script>

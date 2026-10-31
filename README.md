@@ -24,7 +24,7 @@ git+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web.git
 **② 发行版压缩包（镜像，最快）**
 
 ```
-https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.26/dsh-deepseek-web-1.0.26.tgz
+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.27/dsh-deepseek-web-1.0.27.tgz
 ```
 
 **③ 仓库页（镜像浏览）**
@@ -36,7 +36,7 @@ https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web
 > 镜像不可用时，把上面链接里的 `https://gh-proxy.com/` 去掉即可直连 GitHub（官方速度可能较慢）：
 >
 > - 插件 spec：`https://github.com/irerc/dsh-deepseek-web`
-> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.26/dsh-deepseek-web-1.0.26.tgz`
+> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.27/dsh-deepseek-web-1.0.27.tgz`
 
 **不需要任何 API key**：插件自带 provider 配置与本地网关（`127.0.0.1:18081`），装好即用。
 
@@ -131,6 +131,15 @@ bin/cli.mjs           login/accounts/start/stop/status/doctor
 MIT License
 
 ## 更新日志
+
+### v1.0.27
+
+- **修复「浏览器登录抓不到 token」的真正原因**：v1.0.26 里为了从网络层抓 token 写的那段注入脚本，正则里的 `/` 没转义，被模板字符串吃掉后整段脚本语法错误 —— 于是状态栏、提示、抓取全部失效。现在注入脚本拆成独立文件 `server/inject.html`（不再受转义影响），并在发布前做了语法校验。
+- **抓取来源扩到四条**：请求头 `Authorization: Bearer …`、登录/MFA 响应里的 `token`、`localStorage`（含 `{value:…}` 包一层的老格式）、Cookie 与 **IndexedDB**（站点新版把登录态搬到这里）。随便哪条能拿到就立刻回传。
+- **新增「提取并保存 token」按钮**：登录页右上角，已登录状态下点一下就会从当前页面把所有来源扫一遍，不用重新登录。
+- **抓不到时有诊断**：页面 12 秒内没抓到 token，会把「localStorage / Cookie / IndexedDB 清单」回传给插件（只记 key 名，不记值），日志里可查，方便定位。
+- **「检查更新」修好了**：之前 `res` 变量名把 HTTP 响应对象盖住，一点就报 `res.writeHead is not a function`。现在正常返回，没有新版本时明确显示「当前已是最新版本 vX.Y.Z（无需更新）」。
+- **风控拦截不再白屏**：登录页返回 AWS WAF 人机验证（202 challenge）时自动重试两次，仍失败会显示中文说明页（等 30 秒重试，或改用邮箱+密码登录）。
 
 ### v1.0.26
 
