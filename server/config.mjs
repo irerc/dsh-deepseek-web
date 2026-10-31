@@ -1,10 +1,16 @@
 // 运行配置：settings 界面改的就是这一个文件（唯一事实源）
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const PKG_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-export const STATE_DIR = process.env.DSH_DEEPSEEK_WEB_STATE || path.join(PKG_ROOT, 'state');
+// 状态目录放在 DSH 用户目录下，而不是插件包内：升级/重装插件包时数据不会跟着被替换掉。
+const DSH_HOME = process.env.DSH_HOME || path.join(os.homedir(), '.dsh');
+export const STATE_DIR =
+  process.env.DSH_DEEPSEEK_WEB_STATE || path.join(DSH_HOME, 'storages', 'dsh-deepseek-web');
+// 老版本把状态放在插件包内（<pkg>/state），首次启动时迁移过来，避免升级后「数据全没了」
+const LEGACY_STATE_DIR = path.join(PKG_ROOT, 'state');
 export const CONFIG_FILE = path.join(STATE_DIR, 'config.json');
 
 export const DEFAULTS = {
@@ -28,6 +34,25 @@ export const SECTION_KEYS = ['usage', 'engine', 'accounts', 'addAccount'];
 
 export function ensureStateDir() {
   fs.mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 });
+  migrateLegacyState();
+}
+
+let migrated = false;
+/** 把老版本放在插件包里的 state/ 复制到新的用户目录（只做一次，不覆盖已有数据） */
+function migrateLegacyState() {
+  if (migrated) return;
+  migrated = true;
+  try {
+    if (!fs.existsSync(LEGACY_STATE_DIR)) return;
+    const already = fs.readdirSync(STATE_DIR).filter((f) => f !== 'assets');
+    if (already.length > 0) return;
+    for (const name of fs.readdirSync(LEGACY_STATE_DIR)) {
+      if (name === 'assets') continue;
+      const from = path.join(LEGACY_STATE_DIR, name);
+      const to = path.join(STATE_DIR, name);
+      if (!fs.existsSync(to)) fs.copyFileSync(from, to);
+    }
+  } catch {}
 }
 
 export function normalizeSectionOrder(input) {

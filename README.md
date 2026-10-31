@@ -24,7 +24,7 @@ git+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web.git
 **② 发行版压缩包（镜像，最快）**
 
 ```
-https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.25/dsh-deepseek-web-1.0.25.tgz
+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.26/dsh-deepseek-web-1.0.26.tgz
 ```
 
 **③ 仓库页（镜像浏览）**
@@ -36,7 +36,7 @@ https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web
 > 镜像不可用时，把上面链接里的 `https://gh-proxy.com/` 去掉即可直连 GitHub（官方速度可能较慢）：
 >
 > - 插件 spec：`https://github.com/irerc/dsh-deepseek-web`
-> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.25/dsh-deepseek-web-1.0.25.tgz`
+> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.26/dsh-deepseek-web-1.0.26.tgz`
 
 **不需要任何 API key**：插件自带 provider 配置与本地网关（`127.0.0.1:18081`），装好即用。
 
@@ -131,6 +131,14 @@ bin/cli.mjs           login/accounts/start/stop/status/doctor
 MIT License
 
 ## 更新日志
+
+### v1.0.26
+
+- **修复 v1.0.24 的编辑事故**：维护 / 页面设置 / 关于 三张卡片被误删（表现为「之前的数据全都没了」），已恢复。
+- **数据不再随插件升级丢失**：状态目录从「插件包内 `state/`」迁移到「`~/.dsh/storages/dsh-deepseek-web/`」，首次启动自动把老数据复制过去（已有数据不会被覆盖）。
+- **浏览器登录能抓到 token 了**：站点新版本把 token 存进 IndexedDB，原来只轮询 `localStorage.userToken` 抓不到；现在直接从网络层取（请求头 `Authorization: Bearer …`，以及登录/MFA 响应里的 `user.token`），新旧存储方式都覆盖。
+- **维护卡片新增「检查更新」**：查 GitHub 最新 release，与当前版本比较，给出下载链接（含 gh-proxy 镜像）。
+- **接口 404 有明确提示**：返回 `HTTP 404：该功能需要重启 DSH 后才会加载`，不再静默无反应。
 
 ### v1.0.25
 

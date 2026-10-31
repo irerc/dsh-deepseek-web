@@ -11,7 +11,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
-const STATE_DIR = process.env.DSH_DEEPSEEK_WEB_STATE || path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'state');
+import { loadConfig, STATE_DIR } from './config.mjs';
 const SID_COOKIE = 'dsweb_sid';
 function jarFile(sid) {
   return path.join(STATE_DIR, 'jar-' + sid.replace(/[^a-zA-Z0-9_-]/g, '') + '.json');
@@ -39,7 +39,6 @@ function logLine(line) {
   } catch {}
 }
 
-import { loadConfig } from './config.mjs';
 
 const DEFAULT_SITE = 'chat.deepseek.com';
 const REGION_HEADERS = {
@@ -67,9 +66,30 @@ const INJECT = `
       var url = typeof input === 'string' ? input : (input && input.url) || '';
       var t0 = Date.now();
       var slow = setTimeout(function () { tip('请求超时 15s 仍未返回：' + url); }, 15000);
+      // 站点新版本把 token 存进 IndexedDB，光看 localStorage 抓不到。
+      // 这里直接从网络层捞：请求头里的 Authorization Bearer，或响应 JSON 里的 user.token。
+      try {
+        var h = (init && init.headers) || (input && input.headers) || null;
+        if (h) {
+          var auth = '';
+          if (typeof h.get === 'function') auth = h.get('authorization') || '';
+          else if (Array.isArray(h)) { for (var i = 0; i < h.length; i++) { if (String(h[i][0]).toLowerCase() === 'authorization') auth = h[i][1]; } }
+          else { for (var k in h) { if (String(k).toLowerCase() === 'authorization') auth = h[k]; } }
+          var m = /Bearer\s+([A-Za-z0-9+/=_-]{20,})/.exec(String(auth || ''));
+          if (m) report(m[1]);
+        }
+      } catch (e) {}
       return _fetch.call(this, input, init).then(function (r) {
         clearTimeout(slow);
         if (!r.ok) tip('API ' + r.status + ' ' + url);
+        try {
+          if (/users\/(login|mfa\/check_verification_code)/.test(url)) {
+            r.clone().text().then(function (t) {
+              var mm = /"token"\s*:\s*"([A-Za-z0-9+/=_-]{20,})"/.exec(String(t || ''));
+              if (mm) report(mm[1]);
+            }, function () {});
+          }
+        } catch (e) {}
         // 登录/注册这类接口：把上游真实原因摊开，方便判断是风控、验证码过期还是字段问题
         if (/\/api\/v0\/users\//.test(url)) {
           try {
@@ -97,10 +117,25 @@ const INJECT = `
   var _open = XMLHttpRequest.prototype.open;
   var _send = XMLHttpRequest.prototype.send;
   XMLHttpRequest.prototype.open = function (m, u) { this.__u = u; return _open.apply(this, arguments); };
+  var _setHeader = XMLHttpRequest.prototype.setRequestHeader;
+  XMLHttpRequest.prototype.setRequestHeader = function (k, v) {
+    try {
+      if (String(k).toLowerCase() === 'authorization') {
+        var mm = /Bearer\s+([A-Za-z0-9+/=_-]{20,})/.exec(String(v || ''));
+        if (mm) report(mm[1]);
+      }
+    } catch (e) {}
+    return _setHeader.apply(this, arguments);
+  };
   XMLHttpRequest.prototype.send = function () {
     var xhr = this;
     xhr.addEventListener('loadend', function () {
       if (xhr.status === 0 || xhr.status >= 400) tip('XHR ' + xhr.status + ' ' + xhr.__u);
+      try {
+        var t = xhr.responseText || '';
+        var mm = /"token"\s*:\s*"([A-Za-z0-9+/=_-]{20,})"/.exec(t);
+        if (mm && /users\/(login|mfa)/.test(xhr.__u || '')) report(mm[1]);
+      } catch (e) {}
     });
     return _send.apply(this, arguments);
   };
