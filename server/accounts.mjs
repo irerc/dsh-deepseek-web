@@ -46,6 +46,8 @@ export function publicAccount(a) {
   return {
     id: a.id,
     label: a.label,
+    email: a.email || '',
+    userId: a.userId || '',
     status: a.disabled ? 'disabled' : a.status === 'authExpired' ? 'authExpired' : cooling ? 'cooling' : 'ok',
     cooldownUntil: cooling ? a.cooldownUntil : null,
     addedAt: a.addedAt || null,
@@ -58,12 +60,15 @@ export function listAccounts() {
   return loadAccounts().accounts.map(publicAccount);
 }
 
-export function addAccount({ token, label, cookie = '' }) {
+export function addAccount({ token, label, cookie = '', email = '', userId = '' }) {
   if (!token || typeof token !== 'string' || token.length < 20) throw new Error('token 无效');
   const doc = loadAccounts();
   const exists = doc.accounts.find((a) => a.token === token);
   if (exists) {
     if (cookie) exists.cookie = cookie;
+    if (email) exists.email = email;
+    if (userId) exists.userId = userId;
+    if (label) exists.label = label;
     save(doc);
     return publicAccount(exists);
   }
@@ -72,6 +77,8 @@ export function addAccount({ token, label, cookie = '' }) {
     label: (label || '').trim() || '账号' + (doc.accounts.length + 1),
     token,
     cookie: cookie || '',
+    email: email || '',
+    userId: userId || '',
     addedAt: Date.now(),
     lastUsedAt: null,
     cooldownUntil: null,

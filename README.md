@@ -24,7 +24,7 @@ git+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web.git
 **② 发行版压缩包（镜像，最快）**
 
 ```
-https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.27/dsh-deepseek-web-1.0.27.tgz
+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.28/dsh-deepseek-web-1.0.28.tgz
 ```
 
 **③ 仓库页（镜像浏览）**
@@ -36,7 +36,7 @@ https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web
 > 镜像不可用时，把上面链接里的 `https://gh-proxy.com/` 去掉即可直连 GitHub（官方速度可能较慢）：
 >
 > - 插件 spec：`https://github.com/irerc/dsh-deepseek-web`
-> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.27/dsh-deepseek-web-1.0.27.tgz`
+> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.28/dsh-deepseek-web-1.0.28.tgz`
 
 **不需要任何 API key**：插件自带 provider 配置与本地网关（`127.0.0.1:18081`），装好即用。
 
@@ -131,6 +131,11 @@ bin/cli.mjs           login/accounts/start/stop/status/doctor
 MIT License
 
 ## 更新日志
+
+### v1.0.28
+
+- **「已是最新版本」不再显示在运行设置中间**：操作结果以前统一塞在「运行设置」卡片里，点「检查更新」后提示就夹在勾选框和空闲休眠之间，位置很怪。现在结果横幅固定在整块设置最上方（可点 × 关闭，15 秒自动消失），「维护」卡片里也会常驻显示「当前版本 vX.Y.Z / 最新版本」。
+- **账号显示账号名**：账号以前全叫「浏览器登录」，失效时分不清是哪个号。现在会自动补上邮箱（启动时补、检查时补），账号列表直接显示邮箱；登录失效的账号会额外提示「登录已失效，需要重新登录（邮箱）」。
 
 ### v1.0.27
 

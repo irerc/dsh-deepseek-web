@@ -9,7 +9,10 @@ export async function checkToken(token) {
   try {
     const res = await get('/api/v0/users/current', { token });
     if (res.status === 200 && res.json?.code === 0) {
-      return { ok: true, user: res.json?.data?.biz_data?.user || null };
+      // 这个接口的 biz_data 直接就是 user 对象（不是包在 biz_data.user 里），之前取不到邮箱就是这里错了
+      const biz = res.json?.data?.biz_data || {};
+      const user = biz.user || (biz.id || biz.email ? biz : null);
+      return { ok: true, user };
     }
     return { ok: false, message: res.json?.msg || 'token 已失效，请重新登录后再粘贴' };
   } catch (error) {
