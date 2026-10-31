@@ -177,44 +177,83 @@ function renderApiMessages(list, pick) {
 function buildApiPrompt(list, tools, opts = {}) {
   const pick = (v) => sanitizePrompt(cleanHistoryText(typeof v === 'string' ? v : contentToText(v)));
   const all = (list || []).filter((m) => m && m.role);
-  const sys = all.filter((m) => m.role === 'system' || m.role === 'developer').map((m) => pick(m.content)).filter(Boolean).join('\n\n');
+  const sys = all
+    .filter((m) => m.role === 'system' || m.role === 'developer')
+    .map((m) => ({ role: 'system', content: pick(m.content) }))
+    .filter((m) => m.content);
   const convo = all.filter((m) => m.role === 'user' || m.role === 'assistant' || m.role === 'tool');
 
-  let toolDoc = renderTools(tools, 'full');
-  const header = opts.resume
-    ? '【API 请求 · 续】下面是这段对话新增的消息（更早的内容见上下文）：'
-    : '【API 请求】以下是完整请求体：';
+  /** 还原成 OpenAI 请求体里的那条消息（role / content / tool_calls / tool_call_id）。 */
+  const toApiMessage = (m) => {
+    const out = { role: m.role, content: pick(m.content) };
+    if (Array.isArray(m.tool_calls) && m.tool_calls.length) {
+      out.tool_calls = m.tool_calls.map((tc) => {
+        const f = tc.function || {};
+        let args = f.arguments ?? tc.arguments ?? {};
+        if (typeof args !== 'string') args = JSON.stringify(args);
+        return {
+          id: tc.id || 'call_' + Math.random().toString(36).slice(2, 10),
+          type: 'function',
+          function: { name: f.name || tc.name, arguments: args },
+        };
+      });
+      if (!out.content) out.content = null;
+    }
+    if (m.role === 'tool' && m.tool_call_id) out.tool_call_id = m.tool_call_id;
+    return out;
+  };
 
-  let slice = convo;
-  const build = (part, doc) => {
-    const parts = [];
-    if (sys && !opts.skipSystem) parts.push(sys);
-    let body = header + '\n' + renderApiMessages(part, pick);
-    if (part.length < convo.length) body += '\n[truncated] 更早的消息已省略';
-    parts.push(body);
-    if (doc) parts.push(doc);
-    parts.push(REPLY_JSON ? API_CONTRACT : TEXT_CONTRACT);
+  const shrink = (desc, mode) => (mode === 'full' ? String(desc || '') : String(desc || '').slice(0, mode === 'compact' ? 300 : 120));
+  const buildTools = (mode) =>
+    (tools || [])
+      .map((t) => {
+        const f = t.function || t;
+        if (!f?.name) return null;
+        const schema = f.parameters && typeof f.parameters === 'object' ? f.parameters : { type: 'object', properties: {} };
+        const params =
+          mode === 'names'
+            ? {
+                type: 'object',
+                properties: Object.fromEntries(Object.keys(schema.properties || {}).map((k) => [k, { type: 'string' }])),
+                required: Array.isArray(schema.required) ? schema.required : [],
+              }
+            : schema;
+        return { type: 'function', function: { name: f.name, description: shrink(f.description, mode), parameters: params } };
+      })
+      .filter(Boolean);
+
+  const build = (part, mode) => {
+    const messages = [];
+    if (sys.length && !opts.skipSystem) messages.push(...sys);
+    for (const m of part) messages.push(toApiMessage(m));
+    const body = { model: 'deepseek-web', messages };
+    const toolsJson = buildTools(mode);
+    if (toolsJson.length) body.tools = toolsJson;
+    const head = opts.resume ? '【API 请求体 · 续】前面同一条会话里的消息略过，这里是新增的：' : '【API 请求体】';
+    const parts = [head, JSON.stringify(body), REPLY_JSON ? API_CONTRACT : TEXT_CONTRACT];
     return parts.join('\n\n');
   };
 
-  let out = build(slice, toolDoc);
+  let slice = convo;
+  let mode = 'full';
+  let out = build(slice, mode);
   if (estimateTokens(out) > MAX_PROMPT_TOKENS) {
-    toolDoc = renderTools(tools, 'compact');
-    out = build(slice, toolDoc);
+    mode = 'compact';
+    out = build(slice, mode);
   }
   let dropped = 0;
   while (estimateTokens(out) > MAX_PROMPT_TOKENS && slice.length > 2) {
     const cut = Math.max(1, Math.ceil(slice.length * 0.3));
     slice = slice.slice(cut);
     dropped += cut;
-    out = build(slice, toolDoc);
+    out = build(slice, mode);
   }
   if (estimateTokens(out) > MAX_PROMPT_TOKENS) {
-    toolDoc = renderTools(tools, 'names');
-    out = build(slice, toolDoc);
+    mode = 'names';
+    out = build(slice, mode);
   }
   if (dropped) log('[prompt] dropped ' + dropped + ' old message(s) to fit budget');
-  log('[prompt] size=' + out.length + ' chars ~' + estimateTokens(out) + ' tok sys=' + (opts.skipSystem ? 0 : sys.length) + ' tools=' + toolDoc.length + ' msgs=' + slice.length);
+  log('[prompt] size=' + out.length + ' chars ~' + estimateTokens(out) + ' tok tools=' + mode + ' msgs=' + slice.length);
   return out;
 }
 
@@ -886,6 +925,10 @@ function parseApiReply(raw) {
     return content ? { content, tool_calls: [] } : null;
   }
   if (!obj || typeof obj !== 'object') return null;
+  // 兼容模型直接回「完整 API 响应体」：{"choices":[{"message":{...}}]}
+  if (Array.isArray(obj.choices) && obj.choices[0] && obj.choices[0].message && typeof obj.choices[0].message === 'object') {
+    obj = obj.choices[0].message;
+  }
   const content = typeof obj.content === 'string' ? obj.content : '';
   const list = Array.isArray(obj.tool_calls) ? obj.tool_calls : Array.isArray(obj.toolCalls) ? obj.toolCalls : [];
   const tool_calls = list
