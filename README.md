@@ -24,7 +24,7 @@ git+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web.git
 **② 发行版压缩包（镜像，最快）**
 
 ```
-https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.23/dsh-deepseek-web-1.0.23.tgz
+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.24/dsh-deepseek-web-1.0.24.tgz
 ```
 
 **③ 仓库页（镜像浏览）**
@@ -36,7 +36,7 @@ https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web
 > 镜像不可用时，把上面链接里的 `https://gh-proxy.com/` 去掉即可直连 GitHub（官方速度可能较慢）：
 >
 > - 插件 spec：`https://github.com/irerc/dsh-deepseek-web`
-> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.23/dsh-deepseek-web-1.0.23.tgz`
+> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.24/dsh-deepseek-web-1.0.24.tgz`
 
 **不需要任何 API key**：插件自带 provider 配置与本地网关（`127.0.0.1:18081`），装好即用。
 
@@ -131,6 +131,15 @@ bin/cli.mjs           login/accounts/start/stop/status/doctor
 MIT License
 
 ## 更新日志
+
+### v1.0.24
+
+- **新增「邮箱 + 密码登录」**（不再依赖浏览器）：设置 → DeepSeek 网页版 → 添加账号 →「邮箱 + 密码登录」。
+  - 国外（邮箱注册）账号需要挂 VPN / 海外网络，并把「登录线路」选成「海外（邮箱注册）」。
+  - 新设备首次登录会被要求邮箱验证码，界面会自动多出发码/填码两栏（支持 MFA 流程）。
+  - 登录成功后自动加入账号池，失败会返回服务端原文（如 `PASSWORD_OR_USER_NAME_IS_WRONG`）。
+- **批量登录**：一次粘贴多行 `邮箱----密码` 或 `备注----邮箱----密码`，逐个登录并加入账号池，需要验证码的行会单独列出。
+- **批量导入 token**：手动添加区块支持多行 `备注----token----cookie`，一次导入多个已有账号。
 
 ### v1.0.23
 

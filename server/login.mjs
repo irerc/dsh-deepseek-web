@@ -53,6 +53,83 @@ export async function sendEmailCode(email) {
   }
 }
 
+/**
+ * 邮箱 + 密码登录（不走浏览器）。
+ * 说明：/api/v0/users/login 接受明文 JSON，不需要人机验证；
+ * 新设备首次登录会要求邮箱验证码（MFA），此时返回 needCode + mfaSessionId。
+ */
+export async function loginWithPassword(email, password, opts = {}) {
+  if (!email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return { ok: false, message: '邮箱格式不对' };
+  if (!password || String(password).length < 6) return { ok: false, message: '密码看起来不对（至少 6 位）' };
+  if (loadConfig().loginRegion === 'cn') {
+    // 国内站点基本不开放海外邮箱账号的密码登录，这里只提示，不阻断（用户可能确实是国内账号）
+  }
+  try {
+    const res = await post('/api/v0/users/login', {
+      email,
+      password,
+      device_id: deviceId(),
+      os: 'android',
+    });
+    const biz = res.json?.data?.biz_data || {};
+    const code = res.json?.data?.biz_code;
+    const msg = res.json?.data?.biz_msg || res.json?.msg || '';
+    if (code === 0 && biz?.user?.token) {
+      return { ok: true, token: biz.user.token, user: biz.user };
+    }
+    if (code === 14 || /MFA/i.test(msg)) {
+      return {
+        ok: false,
+        needCode: true,
+        mfaSessionId: biz?.mfa_session_id || biz?.mfaSessionId || '',
+        message: '该账号需要邮箱验证码：已发送或请先点「发送验证码」，再填入 6 位码登录',
+      };
+    }
+    return { ok: false, message: '登录失败：' + (msg || '未知原因（' + JSON.stringify(res.json?.data || {}).slice(0, 120) + '）') };
+  } catch (error) {
+    return { ok: false, message: '登录失败：' + (error.message || error) };
+  }
+}
+
+/** 触发邮箱验证码（MFA 流程），需要 PoW */
+export async function sendMfaCode(mfaSessionId) {
+  try {
+    const challengeRes = await post('/api/v0/users/create_guest_challenge', { target_path: '/api/v0/users/mfa/create_verification_code' });
+    const ch = challengeRes.json?.data?.biz_data?.guest_challenge;
+    let pow = null;
+    if (ch) {
+      const { solvePowHeader } = await import('./pow.mjs');
+      pow = await solvePowHeader(ch, '/api/v0/users/mfa/create_verification_code');
+    }
+    const res = await post(
+      '/api/v0/users/mfa/create_verification_code',
+      { mfa_session_id: mfaSessionId, device_id: deviceId() },
+      pow ? { headers: { 'x-ds-pow-response': pow } } : undefined,
+    );
+    if (res.json?.data?.biz_code === 0) return { ok: true, message: '验证码已发送，请查收邮箱' };
+    return { ok: false, message: '发码失败：' + (res.json?.data?.biz_msg || res.json?.msg || '未知原因') };
+  } catch (error) {
+    return { ok: false, message: '发码失败：' + (error.message || error) };
+  }
+}
+
+/** 用邮箱验证码完成 MFA 登录，成功返回 token */
+export async function loginWithMfaCode(mfaSessionId, code) {
+  if (!mfaSessionId) return { ok: false, message: '缺少 mfa_session_id，请先做一次密码登录' };
+  if (!/^\d{4,8}$/.test(String(code || '').trim())) return { ok: false, message: '验证码格式不对' };
+  try {
+    const res = await post('/api/v0/users/mfa/check_verification_code', {
+      mfa_session_id: mfaSessionId,
+      code: String(code).trim(),
+    });
+    const biz = res.json?.data?.biz_data || {};
+    if (res.json?.data?.biz_code === 0 && biz?.user?.token) return { ok: true, token: biz.user.token, user: biz.user };
+    return { ok: false, message: '验证失败：' + (res.json?.data?.biz_msg || res.json?.msg || '未知原因') };
+  } catch (error) {
+    return { ok: false, message: '验证失败：' + (error.message || error) };
+  }
+}
+
 /** 邮箱验证码登录：站点要求加密体 + 人机验证，这里作为兜底返回明确提示 */
 export async function loginWithEmailCode() {
   return {
