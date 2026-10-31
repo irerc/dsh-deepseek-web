@@ -24,7 +24,7 @@ git+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web.git
 **② 发行版压缩包（镜像，最快）**
 
 ```
-https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/latest/download/dsh-deepseek-web-1.0.21.tgz
+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.22/dsh-deepseek-web-1.0.22.tgz
 ```
 
 **③ 仓库页（镜像浏览）**
@@ -36,7 +36,7 @@ https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web
 > 镜像不可用时，把上面链接里的 `https://gh-proxy.com/` 去掉即可直连 GitHub（官方速度可能较慢）：
 >
 > - 插件 spec：`https://github.com/irerc/dsh-deepseek-web`
-> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/latest/download/dsh-deepseek-web-1.0.21.tgz`
+> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.22/dsh-deepseek-web-1.0.22.tgz`
 
 **不需要任何 API key**：插件自带 provider 配置与本地网关（`127.0.0.1:18081`），装好即用。
 
@@ -131,6 +131,14 @@ bin/cli.mjs           login/accounts/start/stop/status/doctor
 MIT License
 
 ## 更新日志
+
+### v1.0.22
+
+- **登录页不再白屏**：静态资源（main.js 等）带 2 次快速重试（6s/次），失败立刻回磁盘缓存；缓存键去掉了页面每次加载都会变的 `?t=`，同一份 main.js 现在能真正命中缓存；缓存目录只保留最近 30 个文件。
+- **CDN 响应分级**：只有「200 + javascript/css」才当作成功并写缓存；503/502、WAF 挑战页（200 但返回 text/html）一律走重试→缓存→报错，不会再把坏内容写进缓存或当脚本执行。
+- **站点页重试预算收紧**：从 3×30s 改成 2×8s，弱网下快速失败而不是干等 90 秒。
+- **登录失败能看到真实原因**：登录/注册/发码接口返回非成功时，页面底部会显示上游返回的原文（例如字段校验失败、风控拒绝）。
+- **安装链接固定到 tag**：README 与各旧发行版的说明都改成 `releases/download/v<版本>/…`，不会再因为发新版本而 404。
 
 ### v1.0.21
 

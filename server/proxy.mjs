@@ -8,6 +8,7 @@ import http from 'node:http';
 import https from 'node:https';
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
 const STATE_DIR = process.env.DSH_DEEPSEEK_WEB_STATE || path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'state');
@@ -66,6 +67,14 @@ const INJECT = `
       var url = typeof input === 'string' ? input : (input && input.url) || '';
       return _fetch.call(this, input, init).then(function (r) {
         if (!r.ok) tip('API ' + r.status + ' ' + url);
+        // 登录/注册失败时把上游真实原因带出来，便于判断是被风控还是验证码问题
+        if (/\/users\/(login|register|create_email_verification_code|check_verification_code)/.test(url) && r.ok) {
+          try {
+            r.clone().text().then(function (t) {
+              if (t && t.indexOf('"code":0') < 0) tip('登录接口返回：' + String(t).slice(0, 300));
+            }, function () {});
+          } catch (e) {}
+        }
         return r;
       }, function (e) {
         tip('网络失败 ' + url + ' · ' + (e && e.message ? e.message : e));
@@ -240,6 +249,70 @@ function filterResponseHeaders(headers) {
   return out;
 }
 
+
+// ---- 静态资源兜底：CDN 偶发 hangs/断连时，先重试，再退回磁盘缓存，别让登录页白屏 ----
+const ASSET_DIR = path.join(STATE_DIR, 'assets');
+function assetKey(url) {
+  try {
+    const u = new URL(url);
+    return u.origin + u.pathname; // 丢掉 ?t= 这类缓存破坏参数
+  } catch {
+    return String(url).split('?')[0];
+  }
+}
+function assetPath(url) {
+  const hash = crypto.createHash('sha1').update(assetKey(url)).digest('hex');
+  return path.join(ASSET_DIR, hash);
+}
+/** 缓存目录别无限长：只保留最近 30 个文件 */
+function pruneAssets() {
+  try {
+    const files = fs.readdirSync(ASSET_DIR).map((f) => {
+      const full = path.join(ASSET_DIR, f);
+      return { full, mtime: fs.statSync(full).mtimeMs };
+    });
+    files.sort((a, b) => b.mtime - a.mtime);
+    for (const f of files.slice(30)) fs.rmSync(f.full, { force: true });
+  } catch {}
+}
+function readAsset(url) {
+  try { return fs.readFileSync(assetPath(url)); } catch { return null; }
+}
+function writeAsset(url, buf) {
+  try {
+    fs.mkdirSync(ASSET_DIR, { recursive: true });
+    fs.writeFileSync(assetPath(url), buf);
+  } catch {}
+}
+function fetchUpstream(target, method, headers, body, attempts = 3, timeoutMs = 12000) {
+  let lastError = null;
+  const run = (n) =>
+    new Promise((resolve) => {
+      const req = https.request(target, { method, headers }, (up) => {
+        const chunks = [];
+        up.on('data', (c) => chunks.push(c));
+        up.on('end', () => resolve({ up, buf: Buffer.concat(chunks) }));
+        up.on('error', (e) => resolve({ error: e }));
+      });
+      req.setTimeout(timeoutMs, () => {
+        req.destroy(new Error('timeout'));
+      });
+      req.on('error', (e) => {
+        lastError = e;
+        req.destroy();
+        resolve({ error: e });
+      });
+      req.end(body && body.length ? body : undefined);
+    }).then((r) => {
+      if (r.error && n < attempts) {
+        logLine('RETRY(' + n + '/' + attempts + ') ' + target + ' ' + r.error.message);
+        return run(n + 1);
+      }
+      return r;
+    });
+  return run(1).then((r) => (r.error ? { error: lastError || r.error } : r));
+}
+
 export function startLoginProxy({ port = 18090, reportUrl }) {
   const server = http.createServer(async (req, res) => {
     const isCdn = req.url.startsWith('/cdn/');
@@ -259,6 +332,49 @@ export function startLoginProxy({ port = 18090, reportUrl }) {
     const upstreamCookie = [rawCookie.split(';').map((x) => x.trim()).filter((x) => x && !x.startsWith(SID_COOKIE + '=')).join('; '), cookieHeader(jar)].filter(Boolean).join('; ');
     if (upstreamCookie) headers.cookie = upstreamCookie;
     if (body.length) headers['content-length'] = String(body.length);
+
+    // 静态资源（/cdn/…）：带重试 + 磁盘缓存，CDN 抽风也不至于白屏
+    if (isCdn) {
+      // 快速重试（6s × 2）；失败后立刻回缓存，别让用户对着白屏等 30 秒
+      const r = await fetchUpstream(target, req.method, headers, body, 2, 6000);
+      const ctype0 = r.up ? String(r.up.headers['content-type'] || '') : '';
+      const good = r.up && (r.up.statusCode || 0) === 200 && /javascript|text\/css|font|image|octet-stream/.test(ctype0);
+      if (!good) {
+        const cached = readAsset(target);
+        if (cached) {
+          logLine('CACHE-HIT ' + req.url);
+          const ext = path.extname(new URL(target).pathname).toLowerCase();
+          const type = ext === '.js' ? 'application/javascript; charset=utf-8' : ext === '.css' ? 'text/css; charset=utf-8' : 'application/octet-stream';
+          res.writeHead(200, { 'content-type': type, 'cache-control': 'public, max-age=600' });
+          res.end(cached);
+          return;
+        }
+        logLine('ERROR ' + (req.method || 'GET') + ' ' + req.url + ' ' + ((r.error && r.error.message) || 'unknown'));
+        res.writeHead(502, { 'content-type': 'text/plain; charset=utf-8' });
+        res.end('资源加载失败（已重试 3 次）：' + ((r.error && r.error.message) || 'unknown'));
+        return;
+      }
+      const ctype = ctype0;
+      let buf = r.buf;
+      if (ctype.includes('javascript')) {
+        let js = buf.toString('utf8');
+        // 让站点认为自己在生产环境（否则用 dev 公钥，登录解密会被服务端拒绝）
+        js = js.replace('if(e.match(/(\\d{1,3}\\.){3,3}\\d{1,3}/))return"dev";', 'if(true)return"production";');
+        js = js.split('"https://fe-static.deepseek.com/chat/"').join('"/cdn/"');
+        buf = Buffer.from(js, 'utf8');
+      }
+      if (good && buf.length > 1024 && /javascript|text\/css/.test(ctype)) {
+        writeAsset(target, buf);
+        pruneAssets();
+      }
+      const outHeaders = filterResponseHeaders(r.up.headers);
+      outHeaders['content-length'] = String(buf.length);
+      res.writeHead(r.up.statusCode || 200, outHeaders);
+      res.end(buf);
+      return;
+    }
+
+    const send = (attempt) => {
     const upstream = https.request(
       target,
       {
@@ -333,16 +449,26 @@ export function startLoginProxy({ port = 18090, reportUrl }) {
         });
       },
     );
-    upstream.setTimeout(45000, () => {
-      logLine('TIMEOUT ' + (req.method || 'GET') + ' ' + req.url);
-      upstream.destroy();
+    upstream.setTimeout(8000, () => {
+      logLine('TIMEOUT(' + attempt + ') ' + (req.method || 'GET') + ' ' + req.url);
+      upstream.destroy(new Error('timeout'));
     });
     upstream.on('error', (error) => {
-      logLine('ERROR ' + (req.method || 'GET') + ' ' + req.url + ' ' + error.message);
+      // 站点偶尔会抽风（连接被掐断/超时）。GET 请求重试最多 3 次；POST 不重试，避免重复提交登录。
+      const canRetry = req.method === 'GET' && attempt < 2 && !res.headersSent;
+      if (canRetry) {
+        logLine('RETRY(' + attempt + '/3) ' + req.url + ' ' + error.message);
+        setTimeout(() => send(attempt + 1), 300);
+        return;
+      }
+      logLine('ERROR ' + (req.method || 'GET') + ' ' + req.url + ' ' + error.message + (process.env.DSW_PROXY_DEBUG ? ' headers=' + JSON.stringify(headers) : ''));
+      if (res.headersSent) return res.end();
       res.writeHead(502, { 'content-type': 'text/plain; charset=utf-8' });
       res.end('代理失败：' + error.message);
     });
     upstream.end(body.length ? body : undefined);
+    };
+    send(1);
   });
   server.listen(port, '127.0.0.1');
   return server;
