@@ -24,7 +24,7 @@ git+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web.git
 **② 发行版压缩包（镜像，最快）**
 
 ```
-https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.28/dsh-deepseek-web-1.0.28.tgz
+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.29/dsh-deepseek-web-1.0.29.tgz
 ```
 
 **③ 仓库页（镜像浏览）**
@@ -36,7 +36,7 @@ https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web
 > 镜像不可用时，把上面链接里的 `https://gh-proxy.com/` 去掉即可直连 GitHub（官方速度可能较慢）：
 >
 > - 插件 spec：`https://github.com/irerc/dsh-deepseek-web`
-> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.28/dsh-deepseek-web-1.0.28.tgz`
+> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.29/dsh-deepseek-web-1.0.29.tgz`
 
 **不需要任何 API key**：插件自带 provider 配置与本地网关（`127.0.0.1:18081`），装好即用。
 
@@ -131,6 +131,15 @@ bin/cli.mjs           login/accounts/start/stop/status/doctor
 MIT License
 
 ## 更新日志
+
+### v1.0.29
+
+- **检查更新后可以一键安装**：查到新版本时，「维护」卡片会多出一个绿色「安装 vX.Y.Z」按钮。
+  - 从 gh-proxy 镜像下载（失败自动回退 GitHub 直链），解压后只替换 `<DSH_HOME>/profiles/<profile>/node_modules/dsh-deepseek-web` 这一个目录；
+  - 旧目录先备份成 `dsh-deepseek-web.bak-<时间戳>`，替换失败自动回滚，只保留最近一份备份；
+  - 安装前会先停掉引擎子进程；装完提示「重启 DSH 后生效」。
+  - 如果当前是 link 安装（开发模式），不会动链接，只把安装包下好并提示路径。
+- 安装包和进度都在「维护」卡片里直接看得到，不用再去 GitHub 手动下载。
 
 ### v1.0.28
 
