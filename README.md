@@ -24,7 +24,7 @@ git+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web.git
 **② 发行版压缩包（镜像，最快）**
 
 ```
-https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/latest/download/dsh-deepseek-web-1.0.12.tgz
+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/latest/download/dsh-deepseek-web-1.0.13.tgz
 ```
 
 **③ 仓库页（镜像浏览）**
@@ -36,7 +36,7 @@ https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web
 > 镜像不可用时，把上面链接里的 `https://gh-proxy.com/` 去掉即可直连 GitHub（官方速度可能较慢）：
 >
 > - 插件 spec：`https://github.com/irerc/dsh-deepseek-web`
-> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/latest/download/dsh-deepseek-web-1.0.12.tgz`
+> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/latest/download/dsh-deepseek-web-1.0.13.tgz`
 
 **不需要任何 API key**：插件自带 provider 配置与本地网关（`127.0.0.1:18081`），装好即用。
 
@@ -131,6 +131,13 @@ bin/cli.mjs           login/accounts/start/stop/status/doctor
 MIT License
 
 ## 更新日志
+
+### v1.0.13
+
+- **内部标记不再漏进正文**：网页模型会吐 `<|DSML|tool_calls>`、写成歪格式的 `<DSML||calls>`（全角竖线）、甚至整段 `{"role":"assistant",...}` JSON。现在这些一律解析成 `tool_calls` 或被吞掉，任何情况下都不会出现在对话里。
+- **参数修不好也不再丢弃调用**：以前缺必填参数会丢掉调用、并在正文里写一句「参数不完整，已忽略」，用户只能手动说「继续」；现在照原样透传给宿主工具层，由工具报错、模型在同一轮里自己改（与官方 API 行为一致）。
+- **写坏的 JSON 自动修复**：字符串里漏转义的换行/制表符会被补回；实在解析不了就按 `"name"`/`"arguments"` 逐字段抠出调用。
+- **支持同时跑多个对话**：去掉全局串行锁，改为「全局并发 `maxConcurrency` + 每账号并发 `perAccountConcurrency`（默认 2）」。两个对话同时请求实测 7.3s（串行需 12.0s）。
 
 ### v1.0.12
 

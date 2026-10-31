@@ -16,15 +16,17 @@ export class DeepSeekHttp {
     this.log = log;
     this.busy = Promise.resolve();
     this._depth = 0;
+    this._active = 0;
+    this._accActive = new Map();
     this.closed = false;
     this.lastError = null;
   }
 
   get pending() {
-    return this._depth;
+    return this._active;
   }
 
-  /** 串行化：同一时刻只跑一个上游请求，避免触发风控 */
+  /** 串行化（只用于账号状态、会话列表这类轻量管理操作） */
   exclusive(fn) {
     this._depth += 1;
     const wrapped = () => fn().finally(() => {
@@ -33,6 +35,32 @@ export class DeepSeekHttp {
     const run = this.busy.then(wrapped, wrapped);
     this.busy = run.catch(() => {});
     return run;
+  }
+
+  /**
+   * 真正跑一次上游对话：全局并发上限 maxConcurrency，同一账号仍然串行。
+   * 不同对话（不同 web 会话）可以并行，不再像以前那样全局只允许一个请求，
+   * 否则同时开两个对话时第二个会被卡住。
+   */
+  async _runChat(accountId, fn) {
+    const cfg = loadConfig();
+    const totalLimit = Math.max(1, Number(cfg.maxConcurrency) || 4);
+    const perAccount = Math.max(1, Number(cfg.perAccountConcurrency) || 1);
+    for (;;) {
+      const cur = this._accActive.get(accountId) || 0;
+      if (cur < perAccount && this._active < totalLimit) {
+        this._accActive.set(accountId, cur + 1);
+        this._active += 1;
+        break;
+      }
+      await sleep(50);
+    }
+    try {
+      return await fn();
+    } finally {
+      this._accActive.set(accountId, Math.max(0, (this._accActive.get(accountId) || 1) - 1));
+      this._active = Math.max(0, this._active - 1);
+    }
   }
 
   async close() {
@@ -118,7 +146,9 @@ export class DeepSeekHttp {
       if (!token) continue;
       try {
         await this.pace(account.id);
-        const out = await this._chatOnce({ token, cookie: getCookie(account.id), prompt, thinking, sessionId, parentId, onDelta, idleMs });
+        const out = await this._runChat(account.id, () =>
+          this._chatOnce({ token, cookie: getCookie(account.id), prompt, thinking, sessionId, parentId, onDelta, idleMs }),
+        );
         markUsed(account.id);
         return { ...out, accountId: account.id };
       } catch (error) {

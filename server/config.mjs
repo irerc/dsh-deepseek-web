@@ -12,7 +12,7 @@ export const DEFAULTS = {
   idleStopMs: 10 * 60 * 1000, // 空闲多久关停引擎
   sendGapMs: 1200, // 同一账号两次请求的最小间隔
   maxConcurrency: 4, // 全局并发上限
-  perAccountConcurrency: 1,
+  perAccountConcurrency: 2,
   defaultAccount: null, // 不指定时按账号池轮询
   port: Number(process.env.DEEPSEEK_BRIDGE_PORT || 18081),
   // 设置页卡片显示顺序（由设置页最下方的「页面设置」修改）

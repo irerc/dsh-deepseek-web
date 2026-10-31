@@ -332,31 +332,69 @@ function parseToolJson(body) {
 // DeepSeek 网页模型有时会吐原生 DSML 标记（<|DSML|...>），直接抹掉，别让它们出现在正文里
 
 // 兜底：模型可能绕过自定义协议，直接吐 DeepSeek 原生的 DSML 工具标记
-function parseDsmlToolCalls(raw) {
+function inferToolName(args, schemas) {
+  const keys = Object.keys(args || {});
+  if (!keys.length || !schemas) return null;
+  const hits = [];
+  for (const [name, schema] of schemas) {
+    const props = schema && schema.properties ? Object.keys(schema.properties) : [];
+    const required = Array.isArray(schema && schema.required) ? schema.required : [];
+    if (!props.length) continue;
+    if (!keys.every((k) => props.includes(k))) continue;
+    if (!required.every((k) => keys.includes(k))) continue;
+    hits.push(name);
+  }
+  return hits.length === 1 ? hits[0] : null;
+}
+
+// 解析 DSML 工具块。网页模型偶尔会把标记写歪（`<DSML||parameter ...>`、全角竖线 ｜、
+// 甚至整个 `<invoke name="x">` 都不写），所以这里按「宽松匹配 + 按 schema 反推工具名」处理，
+// 目标只有一个：把调用解析出来，绝不把这种标记漏进用户可见的正文。
+function parseDsmlToolCalls(raw, schemas) {
   if (!raw) return null;
-  const nm = /invoke\s+name\s*=\s*["']?([A-Za-z0-9_.\-]+)/i.exec(raw);
-  if (!nm) return null;
   const args = {};
-  const re = /parameter\s+name\s*=\s*["']?([A-Za-z0-9_.\-]+)[^>]*>([\s\S]*?)(?:<\s*\/?[^>]*parameter\s*>|$)/gi;
+  const re = /<\s*\/?\s*(?:DSML|[|｜])*[^>]*?parameter\s+name\s*=\s*["']?([A-Za-z0-9_.\-]+)["']?([^>]*)>([\s\S]*?)(?=<\s*\/?\s*(?:DSML|[|｜])|$)/gi;
   let m;
   while ((m = re.exec(raw))) {
-    const val = m[2].replace(/<[^>]*>/g, '').trim();
-    args[m[1]] = val;
+    const key = m[1];
+    const attrs = m[2] || '';
+    let val = m[3].replace(/<[^>]*>/g, '').trim();
+    if (!/string\s*=\s*["']?true/i.test(attrs)) {
+      if (/^-?\d+(\.\d+)?$/.test(val)) val = Number(val);
+      else if (/^(true|false)$/i.test(val)) val = /^true$/i.test(val);
+      else { try { val = JSON.parse(val); } catch {} }
+    }
+    args[key] = val;
   }
-  return { name: nm[1], arguments: JSON.stringify(args) };
+  let name = null;
+  const nm = /invoke\s+name\s*=\s*["']?([A-Za-z0-9_.\-]+)/i.exec(raw);
+  if (nm) name = nm[1];
+  if (!name) name = inferToolName(args, schemas);
+  if (!name || !Object.keys(args).length) return null;
+  return { name, arguments: JSON.stringify(args) };
 }
 
 function stripSentinels(t) {
   if (!t) return t;
-  return t
-    .replace(/<[|｜]+\s*DSML\s*[|｜][^>]*>/gi, '')
-    .replace(/<[|｜]+\s*\/\s*DSML\s*[|｜][^>]*>/gi, '')
+  const hadDsml = /DSML/i.test(t) || /[|｜]{2}\s*(?:calls|invoke|parameter)\b/i.test(t);
+  let out = t
+    .replace(/<[|｜]+\s*\/?\s*DSML\s*[|｜][^>]*>/gi, '')
     .replace(/[|｜]{2}DSML[|｜]{2}[^\s>]*/gi, '')
+    .replace(/[|｜]{1,2}\s*DSML\s*[|｜]{1,2}/gi, '');
+  if (hadDsml) {
+    // 确认是 DSML 才做激进清理，避免误伤正文里的普通尖括号
+    out = out
+      .replace(/<\s*\/?\s*DSML\b[^>]*>/gi, '')
+      .replace(/<\s*\/?\s*(?:calls|invoke|parameter)\b[^>]*>/gi, '')
+      .replace(/<\s*\/?\s*[|｜]{1,2}\s*(?:calls|invoke|parameter)?\s*[|｜]{0,2}\s*>/gi, '');
+  }
+  return out
     .replace(/<\s*calls>/gi, '')
     .replace(/<\s*invoke\b[^>]*>/gi, '')
     .replace(/<\s*\/\s*invoke>/gi, '')
     .replace(/<\s*parameter\b[^>]*>/gi, '')
-    .replace(/<\s*\/\s*parameter>/gi, '');
+    .replace(/<\s*\/\s*parameter>/gi, '')
+    .replace(/<\s*\/?\s*(?:tool_calls|args)\b[^>]*>/gi, '');
 }
 
 function normText(t) {
@@ -446,6 +484,12 @@ async function handleChat(req, res) {
   const stream = body.stream !== false;
   const messages = body.messages || [];
   const tools = body.tools || [];
+  // 工具 schema 表：参数校验与 DSML 解析都要用，提前建好
+  const toolSchemas = new Map();
+  for (const t of tools) {
+    const f = t?.function || t;
+    if (f?.name) toolSchemas.set(f.name, f.parameters || {});
+  }
 
   let convKey = conversationKey(messages);
   let prev = chatMap[convKey];
@@ -590,7 +634,13 @@ async function handleChat(req, res) {
     const parsed = parseApiReply(raw);
     if (process.env.DSW_DEBUG_JSON) log('[json] raw=' + raw.length + ' ' + JSON.stringify(raw.slice(0, 160)) + ' parsed=' + Boolean(parsed));
     if (!parsed) {
-      // 不是合法 JSON：当普通文本处理
+      // 像「回复信封」但解析不了：绝不能把原始 JSON 当正文吐给用户（那就是满屏 {"role":...}）。
+      // 直接丢弃，让上层当作空回复重试。
+      if (/^\s*\{\s*"(?:role|content|tool_calls|choices)"/.test(raw) || /"tool_calls"\s*:/.test(raw)) {
+        log('[json] envelope unparseable, dropped (' + raw.length + ' chars)');
+        return;
+      }
+      // 不是信封（比如用户真的想要一段 JSON）：当普通文本处理
       textOut += raw;
       if (stream) {
         if (!headersSent) sendChunk({ role: 'assistant', content: '' });
@@ -614,8 +664,11 @@ async function handleChat(req, res) {
   let mode = 'text'; // text | tool | dsml
   let dsmlBuf = '';
   const HOLD = 24;
-  const DSML_START = /<\s*[|｜]\s*[|｜]?\s*(?:DSML|\/\s*DSML)/i;
-  const DSML_END = /<\s*\/\s*[|｜][^>]*calls\s*>/i;
+  const DSML_START = /<\s*\/?\s*(?:DSML\b|[|｜]{1,2}\s*DSML)/i;
+  const DSML_END = /<\s*\/\s*[^>]*\bcalls\b[^>]*>/i;
+  // 模型有时写成 `<DSML||calls>` 这种没有标准闭合标签的歪格式：
+  // 一旦见到就整块吞到流结束，再统一解析，避免把半截标记漏给用户。
+  let dsmlToEnd = false;
 
   const pump = () => {
     for (;;) {
@@ -630,7 +683,12 @@ async function handleChat(req, res) {
         if (i >= 0) {
           if (i > 0) emitText(buf.slice(0, i));
           if (kind === 'tool') { buf = buf.slice(i + TOOL_OPEN.length); mode = 'tool'; }
-          else { buf = buf.slice(i); mode = 'dsml'; dsmlBuf = ''; }
+          else {
+            buf = buf.slice(i);
+            mode = 'dsml';
+            dsmlBuf = '';
+            dsmlToEnd = /^<\s*DSML\b/i.test(buf);
+          }
           continue;
         }
         if (buf.length > HOLD) {
@@ -652,6 +710,7 @@ async function handleChat(req, res) {
         continue;
       }
       // dsml：整块吞掉
+      if (dsmlToEnd) { dsmlBuf += buf; buf = ''; return; }
       const mEnd = DSML_END.exec(buf);
       if (!mEnd) { dsmlBuf += buf; buf = ''; return; }
       const endIdx = mEnd.index + mEnd[0].length;
@@ -659,7 +718,7 @@ async function handleChat(req, res) {
       buf = buf.slice(endIdx);
       mode = 'text';
       rawText += dsmlBuf;
-      const c = parseDsmlToolCalls(dsmlBuf);
+      const c = parseDsmlToolCalls(dsmlBuf, toolSchemas);
       if (c) calls.push(c);
       else log('[chat] dsml block without tool call, dropped');
       dsmlBuf = '';
@@ -686,7 +745,7 @@ async function handleChat(req, res) {
       dsmlBuf += buf;
       buf = '';
       rawText += dsmlBuf;
-      const c = parseDsmlToolCalls(dsmlBuf);
+      const c = parseDsmlToolCalls(dsmlBuf, toolSchemas);
       if (c) calls.push(c);
       else log('[chat] trailing dsml block without tool call, dropped');
       dsmlBuf = '';
@@ -720,23 +779,21 @@ async function handleChat(req, res) {
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       const useSession = attempt === 1 ? (prev?.sessionId || null) : null;
       const useParent = attempt === 1 ? (prev?.parentId || null) : null;
-      out = await browser.exclusive(() =>
-        withTimeout(
-          browser.chat({
-            prompt,
-            thinking: model.thinking,
-            sessionId: useSession,
-            parentId: useParent,
-            preferAccount: accountLabel || null,
-            onDelta: (block) => {
-              if (process.env.DSW_DEBUG_RAW) log('[raw] ' + JSON.stringify(String(block).slice(0, 300)));
-              parser.feed(block);
-            },
-            idleMs: 180000,
-          }),
-          300000,
-          'chat',
-        ),
+      out = await withTimeout(
+        browser.chat({
+          prompt,
+          thinking: model.thinking,
+          sessionId: useSession,
+          parentId: useParent,
+          preferAccount: accountLabel || null,
+          onDelta: (block) => {
+            if (process.env.DSW_DEBUG_RAW) log('[raw] ' + JSON.stringify(String(block).slice(0, 300)));
+            parser.feed(block);
+          },
+          idleMs: 180000,
+        }),
+        300000,
+        'chat',
       );
       endTools();
       finishJsonMode();
@@ -787,7 +844,7 @@ async function handleChat(req, res) {
 
   // 兜底：有些情况下工具块是最后才完整出现的
   if (!calls.length) {
-    const dsml = parseDsmlToolCalls(rawText);
+    const dsml = parseDsmlToolCalls(rawText, toolSchemas);
     if (dsml) {
       log('[chat] recovered tool call from DSML markup: ' + dsml.name);
       calls.push(dsml);
@@ -837,28 +894,17 @@ async function handleChat(req, res) {
   });
   if (uniqCalls.length !== calls.length) log('[chat] dropped ' + (calls.length - uniqCalls.length) + ' duplicate tool call(s)');
 
-  // 参数校验：DSH 的工具会拒收缺少必填参数的调用，模型收到报错后会反复重试同一个坏调用。
-  // 这里先做能做的修补（description 可由 command 推导），修不好就丢掉，并给用户一句说明。
-  const schemas = new Map();
-  for (const t of tools) {
-    const f = t?.function || t;
-    if (f?.name) schemas.set(f.name, f.parameters || {});
-  }
+  // 参数修补：类型按 schema 纠正、description 可由 command 推导。
+  // 修不好也照样把调用透传给宿主——和官方 API 一样，由工具层报错、模型在同一轮里自己改；
+  // 以前是直接丢掉并往正文里塞一句「参数不完整，已忽略」，用户只会看到一句莫名其妙的话，还得手动说「继续」。
+  const schemas = toolSchemas;
   const safeCalls = [];
-  const droppedCalls = [];
   for (const c of uniqCalls) {
     const r = repairToolArgs(c, schemas);
     if (r.ok) safeCalls.push({ name: c.name, arguments: JSON.stringify(r.args) });
     else {
-      droppedCalls.push(c.name + '（' + r.reason + '）');
-      log('[tool] invalid call dropped: ' + c.name + ' — ' + r.reason);
-    }
-  }
-  if (droppedCalls.length && !textOut.trim()) {
-    textOut = '（这一轮的工具调用参数不完整，已忽略：' + droppedCalls.join('；') + '。请补全参数后重试。）';
-    if (stream) {
-      if (!headersSent) sendChunk({ role: 'assistant', content: '' });
-      sendChunk({ content: textOut });
+      log('[tool] invalid call passed through (tool layer will reject): ' + c.name + ' — ' + r.reason);
+      safeCalls.push({ name: c.name, arguments: c.arguments });
     }
   }
   const toolCalls = safeCalls.map((c, i) => ({ id: 'call_' + id.slice(8, 18) + i, type: 'function', function: { name: c.name, arguments: c.arguments } }));
@@ -899,6 +945,77 @@ async function handleChat(req, res) {
 // --------------------------------------------------------------------- helpers
 
 /** 解析「API 格式」回复：{"role":"assistant","content":...,"tool_calls":[...]}。 */
+/** 把 JSON 里漏转义的控制字符（换行/制表符）补回来——网页模型写长脚本时经常这样写坏。 */
+function repairJsonText(raw) {
+  let out = '';
+  let inStr = false;
+  let esc = false;
+  for (const ch of String(raw)) {
+    if (inStr) {
+      if (esc) { out += ch; esc = false; continue; }
+      if (ch === '\\') { out += ch; esc = true; continue; }
+      if (ch === '"') { out += ch; inStr = false; continue; }
+      if (ch === '\n') { out += '\\n'; continue; }
+      if (ch === '\r') { out += '\\r'; continue; }
+      if (ch === '\t') { out += '\\t'; continue; }
+      out += ch;
+      continue;
+    }
+    if (ch === '"') inStr = true;
+    out += ch;
+  }
+  return out;
+}
+
+/** 从一个位置开始截一段平衡的 JSON 对象/字符串，容忍里面写坏的转义。 */
+function sliceJsonValue(s) {
+  if (!s) return null;
+  if (s[0] === '"') {
+    let esc = false;
+    for (let i = 1; i < s.length; i++) {
+      const ch = s[i];
+      if (esc) { esc = false; continue; }
+      if (ch === '\\') { esc = true; continue; }
+      if (ch === '"') return s.slice(0, i + 1);
+    }
+    return null;
+  }
+  if (s[0] !== '{') return null;
+  let depth = 0;
+  let inStr = false;
+  let esc = false;
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (inStr) {
+      if (esc) { esc = false; continue; }
+      if (ch === '\\') { esc = true; continue; }
+      if (ch === '"') inStr = false;
+      continue;
+    }
+    if (ch === '"') inStr = true;
+    else if (ch === '{') depth++;
+    else if (ch === '}') { depth--; if (depth === 0) return s.slice(0, i + 1); }
+  }
+  return null;
+}
+
+/** JSON 整体解析失败时的兜底：按 "name"/"arguments" 逐字段抠出工具调用。 */
+function scanToolCallsLoose(raw) {
+  const out = [];
+  const re = /"name"\s*:\s*"([A-Za-z0-9_.\-]+)"/g;
+  let m;
+  while ((m = re.exec(raw))) {
+    const after = raw.slice(m.index);
+    const am = /"arguments"\s*:\s*/i.exec(after);
+    if (!am) continue;
+    const val = sliceJsonValue(after.slice(am.index + am[0].length));
+    if (!val) continue;
+    out.push({ name: m[1], arguments: val[0] === '"' ? JSON.parse(val) : val });
+    if (out.length >= 24) break;
+  }
+  return out;
+}
+
 function parseApiReply(raw) {
   if (!raw) return null;
   let text = String(raw).trim();
@@ -906,16 +1023,24 @@ function parseApiReply(raw) {
   const i = text.indexOf('{');
   const j = text.lastIndexOf('}');
   if (i < 0 || j <= i) return null;
+  const body = text.slice(i, j + 1);
   let obj;
   try {
-    obj = JSON.parse(text.slice(i, j + 1));
+    obj = JSON.parse(body);
   } catch {
-    // 容错：长正文里的转义偶尔写坏，退一步只把 content 字段抠出来
-    const m = /"content"\s*:\s*"((?:[^"\\]|\\.)*)"/.exec(text);
-    if (!m) return null;
-    let content = m[1];
-    try { content = JSON.parse('"' + content + '"'); } catch {}
-    return content ? { content, tool_calls: [] } : null;
+    try {
+      obj = JSON.parse(repairJsonText(body));
+    } catch {
+      // 二次兜底：整段 JSON 写坏了，就按字段把 tool_calls / content 抠出来
+      const loose = scanToolCallsLoose(text);
+      const mc = /"content"\s*:\s*"((?:[^"\\]|\\.)*)"/.exec(text);
+      let content = '';
+      if (mc) {
+        try { content = JSON.parse('"' + mc[1] + '"'); } catch { content = mc[1]; }
+      }
+      if (!loose.length && !content) return null;
+      return { content: content || '', tool_calls: loose };
+    }
   }
   if (!obj || typeof obj !== 'object') return null;
   // 兼容模型直接回「完整 API 响应体」：{"choices":[{"message":{...}}]}
@@ -1066,10 +1191,16 @@ function coerceValue(value, schema, path) {
 function repairToolArgs(call, schemas) {
   const schema = schemas.get(call.name);
   let args;
+  const rawArgs = call.arguments || '{}';
   try {
-    args = JSON.parse(call.arguments || '{}');
+    args = JSON.parse(rawArgs);
   } catch {
-    return { ok: false, reason: '参数不是合法 JSON' };
+    try {
+      args = JSON.parse(repairJsonText(rawArgs));
+      log('[tool] repaired broken JSON in arguments of ' + call.name);
+    } catch {
+      return { ok: false, reason: '参数不是合法 JSON' };
+    }
   }
   if (!args || typeof args !== 'object') return { ok: false, reason: '参数不是对象' };
   if (!schema) return { ok: true, args };
@@ -1131,6 +1262,19 @@ if (process.env.DSW_SELFTEST_PROMPT) {
     const schemas = new Map();
     for (const t of spec.tools || []) { const f = t.function || t; if (f?.name) schemas.set(f.name, f.parameters || {}); }
     for (const c of spec.repair) console.log(JSON.stringify(c, null, 0), '→', JSON.stringify(repairToolArgs(c, schemas)));
+    process.exit(0);
+  }
+  if (spec.reply !== undefined) {
+    const parsed = parseApiReply(spec.reply);
+    console.log('parsed:', JSON.stringify(parsed));
+    process.exit(0);
+  }
+  if (spec.dsml) {
+    const schemas = new Map();
+    for (const t of spec.tools || []) { const f = t.function || t; if (f?.name) schemas.set(f.name, f.parameters || {}); }
+    const parsed = parseDsmlToolCalls(spec.dsml, schemas);
+    console.log('parsed:', JSON.stringify(parsed));
+    console.log('stripped:', JSON.stringify(stripSentinels(spec.dsml)));
     process.exit(0);
   }
   const prompt = buildApiPrompt(spec.messages || [], spec.tools || []);
