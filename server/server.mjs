@@ -424,8 +424,8 @@ async function handleChat(req, res) {
   const messages = body.messages || [];
   const tools = body.tools || [];
 
-  const convKey = conversationKey(messages);
-  const prev = chatMap[convKey];
+  let convKey = conversationKey(messages);
+  let prev = chatMap[convKey];
 
   // ---- 上下文同步：像官方 API 一样，保证网页会话拿到的历史与 messages[] 完全一致 ----
   // transcript = 去掉 system 后的逻辑历史（system 每轮含时间会变，不参与指纹）
@@ -442,50 +442,44 @@ async function handleChat(req, res) {
   const lastUser = [...messages].reverse().find((m) => m.role === 'user');
   const toolDoc = renderTools(tools);
 
+  // 网页会话「一条对话用到底」：只要这段 DSH 对话有一轮跑过，后面就一直复用同一个网页会话。
+  // 历史被 DSH 压缩/编辑导致首条消息变了时，用上一轮回复的指纹把会话找回来。
+  if (!prev) {
+    for (const [k, v] of Object.entries(chatMap)) {
+      if (!v || !v.sessionId || !v.replyDigest) continue;
+      const known = new Set([v.replyDigest, ...(Array.isArray(v.recentReplies) ? v.recentReplies : [])].filter(Boolean));
+      const hit = transcript.some(
+        (m) => m.role === 'assistant' && known.has(crypto.createHash('sha1').update(normText(m.text)).digest('hex')),
+      );
+      if (hit) {
+        prev = v;
+        convKey = k;
+        log('[ctx] adopted existing web session by reply digest');
+        break;
+      }
+    }
+  }
+
   let continuing = Boolean(prev?.sessionId);
-  let reason = 'new';
+  let reason = continuing ? 'continuation' : 'new';
+  let from = Number(prev?.msgCount || 0);
   if (continuing) {
-    const known = Number(prev.msgCount || 0);
+    const known = from;
     const prefixOk =
       known > 0 &&
       known <= transcript.length &&
       prev.digestPrefix === crypto.createHash('sha1').update(JSON.stringify(transcript.slice(0, known))).digest('hex');
-    // 上一轮我们给的回复，必须还是 DSH 记住的那一条；被编辑/压缩改写过就判定为分叉
-    const replyOk = (() => {
-      const nextMsg = transcript[known];
-      if (!prev.replyDigest || !nextMsg || nextMsg.role !== 'assistant') return true;
-      const h = crypto.createHash('sha1').update(normText(nextMsg.text)).digest('hex');
-      return h === prev.replyDigest;
-    })();
-    if (prefixOk && !replyOk) log('[ctx] assistant reply was rewritten → treat as diverged');
-    if (!prefixOk || !replyOk) {
-      const fullText = messages.map((m) => (typeof m.content === 'string' ? m.content : contentToText(m.content))).join('\n');
-      const fullTokens = estimateTokens(fullText) + estimateTokens(toolDoc);
-      if (fullTokens > MAX_PROMPT_TOKENS) {
-        // 历史太大，重发全量会被上游截断（问题反被切掉）；网页会话里已经有大部分内容，继续用它
-        continuing = true;
-        reason = 'soft-continuation';
-        log('[ctx] diverged but transcript too big (~' + fullTokens + ' tok) → keep session, send tail only');
-      } else {
-        continuing = false;
-        reason = 'diverged';
-        log('[ctx] history diverged (known=' + known + ' now=' + transcript.length + ') → resend full transcript');
-      }
-    } else if (transcript.length <= known) {
-      continuing = false;
-      reason = 'retry';
-      log('[ctx] no new messages (known=' + known + ') → resend full transcript');
+    if (!prefixOk || transcript.length <= known) {
+      // 历史对不上（被压缩/编辑/重试同一轮）：不新开会话，继续用这一个，把最近几条重述一遍。
+      from = Math.max(0, transcript.length - 8);
+      reason = 'continuation+resync';
+      log('[ctx] history moved (known=' + known + ' now=' + transcript.length + ') → keep the same web session, resend last few');
     }
   }
 
-  // 语义对齐官方 API：客户端每次给的就是完整 messages[]，我们照它回答。
-  // 同一段对话能复用网页会话时，只补「网页会话里还没有的那部分」（省 token、命中缓存）；
-  // 一旦历史对不上（编辑/压缩/换会话），就整段重发，效果与无状态 API 完全一致。
   let prompt;
   if (continuing) {
     // 只发网页会话里还没有的部分；assistant 是模型自己的输出，不必复述
-    const wasSoft = reason === 'soft-continuation';
-    const from = wasSoft ? Math.max(0, transcript.length - 8) : Number(prev.msgCount || 0);
     const tail = transcript.slice(from).filter((m) => m.role !== 'assistant');
     const lastTool = [...tail].reverse().find((m) => m.role === 'tool');
     const parts = [];
@@ -498,7 +492,7 @@ async function handleChat(req, res) {
       const fb = lastUser ? cleanHistoryText(typeof lastUser.content === 'string' ? lastUser.content : contentToText(lastUser.content)) : '';
       parts.push(fb);
     }
-    reason = wasSoft ? 'soft-continuation' : lastTool ? 'tool-continuation' : 'continuation';
+    reason = lastTool ? reason + '+tool' : reason;
     let body = parts.join('\n\n');
     // 续聊也要守住 token 预算，但工具说明必须完整带上（否则模型这一轮不会调用工具）
     let doc = toolDoc || '';
@@ -713,12 +707,16 @@ async function handleChat(req, res) {
     }
 
 
+    const replyDigest = crypto.createHash('sha1').update(normText(textOut)).digest('hex');
+    const recent = [replyDigest, ...(Array.isArray(prev?.recentReplies) ? prev.recentReplies : prev?.replyDigest ? [prev.replyDigest] : [])];
     const next = {
       sessionId: out.sessionId || prev?.sessionId,
       parentId: parser.responseMessageId() ?? prev?.parentId ?? null,
       msgCount: transcript.length,
       digestPrefix: digest,
-      replyDigest: crypto.createHash('sha1').update(normText(textOut)).digest('hex'),
+      replyDigest,
+      // 历史被压缩后首条消息会变，靠「最近几轮回复的指纹」把这段对话认回来
+      recentReplies: Array.from(new Set(recent)).slice(0, 12),
     };
     if (next.sessionId) { chatMap[convKey] = next; saveChatMap(); }
     log('[chat] done in ' + (Date.now() - t0) + 'ms chars=' + textOut.length + ' reasoning=' + reasoningOut.length + ' calls=' + calls.length + ' msgId=' + next.parentId);
