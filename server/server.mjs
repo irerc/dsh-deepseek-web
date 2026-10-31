@@ -913,6 +913,11 @@ function repairToolArgs(call, schemas) {
   if (!args || typeof args !== 'object') return { ok: false, reason: '参数不是对象' };
   if (!schema) return { ok: true, args };
   const required = Array.isArray(schema.required) ? schema.required : [];
+  const props = schema.properties && typeof schema.properties === 'object' ? Object.keys(schema.properties) : [];
+  // 参数整个是空的，但工具明明需要参数：判为无效（模型常常在信息不足时直接甩一个 {}）
+  if (Object.keys(args).length === 0 && props.length > 0) {
+    return { ok: false, reason: '参数为空，需要 ' + props.slice(0, 6).join(', ') };
+  }
   const miss = () => required.filter((k) => args[k] === undefined || args[k] === null || args[k] === '');
   for (const k of miss()) {
     if (k === 'description' && typeof args.command === 'string' && args.command.trim()) {
