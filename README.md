@@ -24,7 +24,7 @@ git+https://gh-proxy.com/https://github.com/wsxuyue/dsh-deepseek-web.git
 **② 发行版压缩包（镜像，最快）**
 
 ```
-https://gh-proxy.com/https://github.com/wsxuyue/dsh-deepseek-web/releases/latest/download/dsh-deepseek-web-1.0.5.tgz
+https://gh-proxy.com/https://github.com/wsxuyue/dsh-deepseek-web/releases/latest/download/dsh-deepseek-web-1.0.6.tgz
 ```
 
 **③ 仓库页（镜像浏览）**
@@ -36,7 +36,7 @@ https://gh-proxy.com/https://github.com/wsxuyue/dsh-deepseek-web
 > 镜像不可用时，把上面链接里的 `https://gh-proxy.com/` 去掉即可直连 GitHub（官方速度可能较慢）：
 >
 > - 插件 spec：`https://github.com/wsxuyue/dsh-deepseek-web`
-> - 压缩包：`https://github.com/wsxuyue/dsh-deepseek-web/releases/latest/download/dsh-deepseek-web-1.0.5.tgz`
+> - 压缩包：`https://github.com/wsxuyue/dsh-deepseek-web/releases/latest/download/dsh-deepseek-web-1.0.6.tgz`
 
 **不需要任何 API key**：插件自带 provider 配置与本地网关（`127.0.0.1:18081`），装好即用。
 
@@ -131,6 +131,14 @@ bin/cli.mjs           login/accounts/start/stop/status/doctor
 MIT License
 
 ## 更新日志
+
+### v1.0.6
+
+- **按 API 格式收发**：发给网页模型的是 API 请求体形状的内容（`messages[]` 带 role / tool_calls / tool_call_id，加工具清单），并要求模型按 **OpenAI assistant 消息格式**回复：
+  `{"role":"assistant","content":...,"tool_calls":[{"name":...,"arguments":{...}}]}`
+  - 桥接器解析后翻译成标准 OpenAI 响应（正文 + tool_calls），解析失败自动退回纯文本，不会把 JSON 漏给用户。
+  - 需要旧式「正文 + 标记」协议时：环境变量 `DSW_REPLY_FORMAT=text`。
+- **上游报错不再静默**：网页端返回「消息发送过于频繁」等提示时直接回 `429/502` 说明原因，不再空回复重试三次、越retry越被限流。
 
 ### v1.0.5
 

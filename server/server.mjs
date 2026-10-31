@@ -113,110 +113,108 @@ function readableArgs(text) {
     .trim();
 }
 
-/** 把 assistant 消息里的 tool_calls 变成一行可读文本，供历史/续聊提示使用。 */
+/** API 请求里 assistant 的 tool_calls 原样呈现（名字 + 参数），和官方请求体一致。 */
 function describeToolCalls(m) {
   if (!m || !Array.isArray(m.tool_calls) || !m.tool_calls.length) return '';
-  return m.tool_calls
-    .map((tc) => {
+  return JSON.stringify(
+    m.tool_calls.map((tc) => {
       const f = tc.function || {};
-      let args = f.arguments;
+      let args = f.arguments ?? tc.arguments ?? {};
       if (typeof args === 'string') {
         try { args = JSON.parse(args); } catch {}
       }
-      const shown = typeof args === 'string' ? args : JSON.stringify(args || {});
-      return '（我调用了工具 ' + (f.name || '?') + '，参数 ' + readableArgs(shown).slice(0, 300) + '）';
-    })
-    .join('\n');
+      return { name: f.name || tc.name, arguments: args };
+    }),
+  );
 }
 
-function buildNewChatPrompt(messages, tools) {
-  const pick = (v) => sanitizePrompt(cleanHistoryText(typeof v === 'string' ? v : contentToText(v)));
-  const list = (messages || []).filter((m) => m && m.role);
-  const sys = list
-    .filter((m) => m.role === 'system' || m.role === 'developer')
-    .map((m) => pick(m.content))
-    .filter(Boolean)
-    .join('\n\n');
-  const callNames = new Map();
+// 要求模型「按 API 的 assistant 消息格式」回复，桥接器再翻译成 OpenAI 的响应体。
+const API_CONTRACT = [
+  '',
+  '【回复格式】你就是这个 OpenAI 兼容接口的服务端。只输出一个 JSON 对象，不要代码块、不要任何额外文字：',
+  '{"role":"assistant","content":"给用户的正文，可为 null","tool_calls":[{"name":"工具名","arguments":{...}}]}',
+  '- 不需要工具：省略 tool_calls 或写 []，content 写 Markdown 正文（真实换行）；',
+  '- 需要工具：content 可为 null，arguments 必须包含该工具的全部必填参数；',
+  '- 需要用户选择/补充信息时，用提问类工具（如 ask_user_question）作为 tool_calls。',
+].join('\n');
+
+// 万一 JSON 回复在某类账号上不稳，可以用 DSW_REPLY_FORMAT=text 切回「正文 + @@TOOL@@ 标记」协议
+const REPLY_JSON = process.env.DSW_REPLY_FORMAT !== 'text';
+const TEXT_CONTRACT = [
+  '',
+  '【回复格式】正常回答时直接写正文（Markdown，真实换行）；',
+  '需要调用工具时，整条回复只输出一个块，块外不要写任何文字：',
+  '@@TOOL@@',
+  '{"name":"工具名","arguments":{"参数名":"值"}}',
+  '@@END@@',
+].join('\n');
+
+/** 把 messages[] 渲染成 API 请求体的样子（role / tool_calls / tool_call_id 都保留）。 */
+function renderApiMessages(list, pick) {
+  const out = [];
+  const names = new Map();
   for (const m of list) {
-    if (Array.isArray(m.tool_calls)) {
-      for (const tc of m.tool_calls) if (tc && tc.id) callNames.set(tc.id, tc.function?.name || '工具');
-    }
+    if (Array.isArray(m.tool_calls)) for (const tc of m.tool_calls) if (tc?.id) names.set(tc.id, tc.function?.name || '工具');
   }
-  const convo = list
-    .filter((m) => m.role === 'user' || m.role === 'assistant' || m.role === 'tool')
-    .map((m) => {
-      let text = pick(m.content);
-      if (m.role === 'assistant') text = [describeToolCalls(m), text].filter(Boolean).join('\n');
-      if (m.role === 'tool' && m.tool_call_id && callNames.has(m.tool_call_id)) {
-        text = '（' + callNames.get(m.tool_call_id) + ' 的返回结果）\n' + text;
-      }
-      return { role: m.role, text };
-    })
-    .filter((m) => m.text);
+  for (const m of list) {
+    if (!m || !m.role) continue;
+    let head = '[' + m.role + ']';
+    if (m.role === 'tool' && m.tool_call_id) head += ' tool_call_id=' + m.tool_call_id + (names.has(m.tool_call_id) ? ' (=' + names.get(m.tool_call_id) + ')' : '');
+    out.push(head);
+    const calls = describeToolCalls(m);
+    if (calls) out.push('tool_calls: ' + calls);
+    const text = pick(m.content);
+    if (text) out.push(text);
+  }
+  return out.join('\n');
+}
 
-  const lastUser = [...convo].reverse().find((m) => m.role === 'user');
-  if (!lastUser) return sys || '';
-  // 关键：最后一条 user 之后的 assistant/tool 消息（工具调用与工具结果）必须跟在后面一起发，
-  // 否则模型看不到工具结果，会重复调用同一个工具。
-  const lastIdx = convo.lastIndexOf(lastUser);
-  const tail = lastUser.text;
-  const after = convo.slice(lastIdx + 1);
-  const prior = convo.slice(0, lastIdx);
-  const lead = LEAD_INS[Math.floor(Math.random() * LEAD_INS.length)];
+/**
+ * 组装发给网页模型的「API 请求」：
+ *   system 设定 + messages[]（API 形状）+ 工具清单 + 回复格式要求。
+ * opts.resume 表示只发新增消息（网页会话里已有更早的内容）。
+ */
+function buildApiPrompt(list, tools, opts = {}) {
+  const pick = (v) => sanitizePrompt(cleanHistoryText(typeof v === 'string' ? v : contentToText(v)));
+  const all = (list || []).filter((m) => m && m.role);
+  const sys = all.filter((m) => m.role === 'system' || m.role === 'developer').map((m) => pick(m.content)).filter(Boolean).join('\n\n');
+  const convo = all.filter((m) => m.role === 'user' || m.role === 'assistant' || m.role === 'tool');
 
-  const lastIsToolResult = after.length > 0 && after[after.length - 1].role === 'tool';
-  const toolResultHint = lastIsToolResult
-    ? '（末尾是工具的真实返回结果。够回答就直接给最终答案，不要重复调用同一个工具；确实还需要别的工具时才继续调用。）'
-    : '';
+  let toolDoc = renderTools(tools, 'full');
+  const header = opts.resume
+    ? '【API 请求 · 续】下面是这段对话新增的消息（更早的内容见上下文）：'
+    : '【API 请求】以下是完整请求体：';
 
-  const relabel = (slice) =>
-    slice
-      .map((m) => (m.role === 'user' ? '我：' : m.role === 'tool' ? '（工具结果）' : '你：') + m.text)
-      .join('\n\n');
-
-  /** 组装完整 prompt：系统设定 + 工具说明 + 历史 + 最后一条用户消息。 */
-  const compose = (priorSlice, note, toolDoc) => {
+  let slice = convo;
+  const build = (part, doc) => {
     const parts = [];
-    if (sys) parts.push(sys);
-    if (toolDoc) parts.push(toolDoc.trim());
-    if (note) parts.push(note);
-    if (priorSlice.length) parts.push('（接着之前聊的内容继续，前面大概是：）\n' + relabel(priorSlice));
-    if (toolResultHint) parts.push(toolResultHint);
-    const head = parts.length ? lead + '\n\n' + parts.join('\n\n') + '\n\n' : '';
-    let outTail = tail;
-    for (const m of after) {
-      if (m.role === 'tool') outTail += '\n\n工具执行完了，结果如下：\n' + m.text;
-      else if (m.role === 'assistant') outTail += '\n\n' + m.text;
-      else outTail += '\n\n我：' + m.text;
-    }
-    return head + outTail;
+    if (sys && !opts.skipSystem) parts.push(sys);
+    let body = header + '\n' + renderApiMessages(part, pick);
+    if (part.length < convo.length) body += '\n[truncated] 更早的消息已省略';
+    parts.push(body);
+    if (doc) parts.push(doc);
+    parts.push(REPLY_JSON ? API_CONTRACT : TEXT_CONTRACT);
+    return parts.join('\n\n');
   };
 
-  // 1) 先按完整工具说明试；2) 仍超预算就压工具说明；3) 再超才丢最旧的历史。
-  // 关键：工具说明和系统设定永远保留 —— 丢了它们模型就用不了工具、也看不懂提问格式。
-  let toolDoc = renderTools(tools, 'full');
-  let slice = prior;
-  let note = '';
-  let out = compose(slice, note, toolDoc);
+  let out = build(slice, toolDoc);
   if (estimateTokens(out) > MAX_PROMPT_TOKENS) {
     toolDoc = renderTools(tools, 'compact');
-    out = compose(slice, note, toolDoc);
+    out = build(slice, toolDoc);
   }
   let dropped = 0;
-  while (estimateTokens(out) > MAX_PROMPT_TOKENS && slice.length > 0) {
-    const drop = Math.max(1, Math.ceil(slice.length * 0.3));
-    slice = slice.slice(drop);
-    dropped += drop;
-    note = '（更早的对话太长，已省略 ' + dropped + ' 条历史消息）';
-    out = compose(slice, note, toolDoc);
+  while (estimateTokens(out) > MAX_PROMPT_TOKENS && slice.length > 2) {
+    const cut = Math.max(1, Math.ceil(slice.length * 0.3));
+    slice = slice.slice(cut);
+    dropped += cut;
+    out = build(slice, toolDoc);
   }
   if (estimateTokens(out) > MAX_PROMPT_TOKENS) {
     toolDoc = renderTools(tools, 'names');
-    out = compose(slice, note, toolDoc);
+    out = build(slice, toolDoc);
   }
-  if (dropped) log('[prompt] dropped ' + dropped + ' old message(s) to fit tool docs');
-  log('[prompt] size=' + out.length + ' chars ~' + estimateTokens(out) + ' tok sys=' + sys.length + ' tools=' + toolDoc.length + ' history=' + slice.length);
+  if (dropped) log('[prompt] dropped ' + dropped + ' old message(s) to fit budget');
+  log('[prompt] size=' + out.length + ' chars ~' + estimateTokens(out) + ' tok sys=' + (opts.skipSystem ? 0 : sys.length) + ' tools=' + toolDoc.length + ' msgs=' + slice.length);
   return out;
 }
 
@@ -259,15 +257,8 @@ function renderTools(tools, mode = 'full') {
   if (!lines.length) return '';
   const hint =
     mode === 'names'
-      ? '\n\n【可用工具】以下工具可以调用，参数用常规 JSON：\n'
-      : '\n\n【可用工具】需要读写文件、执行命令、搜索、提问确认时，必须真的调用工具，而不是在正文里描述。\n' +
-        '规则：整条回复只输出下面这一个块，块外不要写任何文字；块内是合法 JSON；一次只调一个。\n' +
-        TOOL_OPEN + '\n{"name":"工具名","arguments":{"参数名":"值"}}\n' + TOOL_CLOSE + '\n' +
-        '工具执行完我会把结果贴回给你（以「工具执行完了」开头），你据此继续。不需要工具时正常回答。\n' +
-        '需要用户做选择/补充信息时，调用提问类工具（如 ask_user_question），不要只在正文里问。\n' +
-        '正文请使用真实换行和普通 Markdown，不要输出 JSON 转义写法（例如不要在正文里写 \\n）。\n' +
-        '工具参数里的长文本要分块：单次写入控制在 2000 字左右，不要一次传入超长内容（会被上游截断）。\n' +
-        '参数必须写全每个「必填」字段（例如 bash 需要 command 与 description），缺参数会被工具层直接拒绝。\n';
+      ? '\n【工具清单】\n'
+      : '\n【工具清单】（下面的工具可直接通过 tool_calls 调用）\n';
   return hint + lines.join('\n');
 }
 
@@ -440,7 +431,6 @@ async function handleChat(req, res) {
   const digest = crypto.createHash('sha1').update(JSON.stringify(transcript)).digest('hex');
 
   const lastUser = [...messages].reverse().find((m) => m.role === 'user');
-  const toolDoc = renderTools(tools);
 
   // 网页会话「一条对话用到底」：只要这段 DSH 对话有一轮跑过，后面就一直复用同一个网页会话。
   // 历史被 DSH 压缩/编辑导致首条消息变了时，用上一轮回复的指纹把会话找回来。
@@ -479,38 +469,18 @@ async function handleChat(req, res) {
 
   let prompt;
   if (continuing) {
-    // 只发网页会话里还没有的部分；assistant 是模型自己的输出，不必复述
-    const tail = transcript.slice(from).filter((m) => m.role !== 'assistant');
-    const lastTool = [...tail].reverse().find((m) => m.role === 'tool');
-    const parts = [];
-    if (tail.length > 1) parts.push('（接着上面继续，期间还有这些内容）');
-    for (const m of tail) {
-      if (m.role === 'tool') parts.push('工具执行完了，结果如下（接着上面的活儿干，别重复调用同一个工具；够回答就直接给结论）：\n' + m.text);
-      else parts.push(m.text);
+    // 续聊：把「网页会话里还没有的新消息」按 API 的 messages 形状发过去
+    const delta = transcript.slice(from).filter((m) => m.role !== 'assistant');
+    const lastTool = [...delta].reverse().find((m) => m.role === 'tool');
+    if (lastTool) reason = reason + '+tool';
+    const deltaMsgs = delta.map((m) => ({ role: m.role, content: m.text }));
+    if (!deltaMsgs.length && lastUser) {
+      const fb = cleanHistoryText(typeof lastUser.content === 'string' ? lastUser.content : contentToText(lastUser.content));
+      deltaMsgs.push({ role: 'user', content: fb });
     }
-    if (!parts.length) {
-      const fb = lastUser ? cleanHistoryText(typeof lastUser.content === 'string' ? lastUser.content : contentToText(lastUser.content)) : '';
-      parts.push(fb);
-    }
-    reason = lastTool ? reason + '+tool' : reason;
-    let body = parts.join('\n\n');
-    // 续聊也要守住 token 预算，但工具说明必须完整带上（否则模型这一轮不会调用工具）
-    let doc = toolDoc || '';
-    let budget = MAX_PROMPT_TOKENS - estimateTokens(doc) - 1200;
-    if (estimateTokens(body) > budget) {
-      doc = renderTools(tools, 'compact');
-      budget = MAX_PROMPT_TOKENS - estimateTokens(doc) - 1200;
-    }
-    if (estimateTokens(body) > budget) {
-      const before = estimateTokens(body);
-      while (estimateTokens(body) > budget && body.length > 4000) {
-        body = body.slice(Math.max(2000, Math.ceil(body.length * 0.3)));
-      }
-      log('[prompt] continuation trimmed ~' + before + ' → ~' + estimateTokens(body) + ' tok');
-    }
-    prompt = body + doc;
+    prompt = buildApiPrompt(deltaMsgs, tools, { resume: true, skipSystem: true });
   } else {
-    prompt = buildNewChatPrompt(messages, tools);
+    prompt = buildApiPrompt(messages, tools);
   }
   log('[ctx] conv=' + convKey.slice(0, 8) + ' mode=' + reason + ' sent=' + transcript.length + ' prompt=' + prompt.length + ' session=' + (continuing ? String(prev.sessionId).slice(0, 8) : 'new'));
   if (prompt.length > MAX_PROMPT_CHARS) log('[prompt] WARNING oversize ' + prompt.length);
@@ -557,14 +527,53 @@ async function handleChat(req, res) {
     }
     return out;
   };
+  // 模型按「API 格式」回复时，整条回复是一个 JSON 对象（content + tool_calls）。
+  // 看到开头是 { 就先缓冲，等收完再解析；解析不了就退回当纯文本。
+  let jsonMode = false;
+  let jsonBuf = '';
   const emitText = (t) => {
     if (!t) return;
     const clean = stripSentinels(normalizeDelta(t));
     if (!clean) return;
+    if (jsonMode) {
+      jsonBuf += clean;
+      return;
+    }
+    if (REPLY_JSON && !textOut && clean.trimStart().startsWith('{')) {
+      jsonMode = true;
+      jsonBuf = clean;
+      return;
+    }
     textOut += clean;
     if (!stream) return;
     if (!headersSent) sendChunk({ role: 'assistant', content: '' });
     sendChunk({ content: clean });
+  };
+
+  const finishJsonMode = () => {
+    if (!jsonMode) return;
+    jsonMode = false;
+    const raw = jsonBuf;
+    jsonBuf = '';
+    const parsed = parseApiReply(raw);
+    if (process.env.DSW_DEBUG_JSON) log('[json] raw=' + raw.length + ' ' + JSON.stringify(raw.slice(0, 160)) + ' parsed=' + Boolean(parsed));
+    if (!parsed) {
+      // 不是合法 JSON：当普通文本处理
+      textOut += raw;
+      if (stream) {
+        if (!headersSent) sendChunk({ role: 'assistant', content: '' });
+        sendChunk({ content: raw });
+      }
+      return;
+    }
+    if (parsed.content) {
+      textOut += parsed.content;
+      if (stream) {
+        if (!headersSent) sendChunk({ role: 'assistant', content: '' });
+        sendChunk({ content: parsed.content });
+      }
+    }
+    for (const c of parsed.tool_calls) calls.push(c);
   };
 
   // 正文过滤器：@@TOOL@@ 自定义块 与 DeepSeek 原生 DSML 标记 都从正文里摘掉。
@@ -660,6 +669,7 @@ async function handleChat(req, res) {
     const t0 = Date.now();
     log('[chat] send model=' + modelId + ' msgs=' + messages.length + ' tools=' + tools.length + ' conv=' + convKey.slice(0, 8) + ' session=' + (prev?.sessionId ? prev.sessionId.slice(0, 8) : 'new') + ' thinking=' + model.thinking);
     const parser = createStreamParser((d) => {
+      if (process.env.DSW_DEBUG_STREAM) log('[stream] ' + (d.text ? 'text(' + d.text.length + '):' + JSON.stringify(d.text.slice(0, 80)) : 'reasoning(' + String(d.reasoning || '').length + ')'));
       if (d.text) flushToolsFrom(d.text);
       else if (d.reasoning) {
         reasoningOut += d.reasoning;
@@ -686,7 +696,10 @@ async function handleChat(req, res) {
             sessionId: useSession,
             parentId: useParent,
             preferAccount: accountLabel || null,
-            onDelta: (block) => parser.feed(block),
+            onDelta: (block) => {
+              if (process.env.DSW_DEBUG_RAW) log('[raw] ' + JSON.stringify(String(block).slice(0, 300)));
+              parser.feed(block);
+            },
             idleMs: 180000,
           }),
           300000,
@@ -694,14 +707,29 @@ async function handleChat(req, res) {
         ),
       );
       endTools();
+      finishJsonMode();
       if (textOut || calls.length) break;
+      const upstreamError = parser.error();
+      if (upstreamError) {
+        // 站点明确报错（限流/会话失效）：不要再盲重重试，直接把原因回给客户端
+        log('[chat] upstream error: ' + JSON.stringify(upstreamError));
+        if (!headersSent) {
+          const rate = /频繁|rate limit/i.test(upstreamError.message) || upstreamError.finish === 'rate_limit_reached';
+          json(res, rate ? 429 : 502, {
+            error: { message: '网页版返回错误：' + upstreamError.message, type: rate ? 'rate_limit' : 'upstream_error' },
+          });
+        } else {
+          res.end();
+        }
+        return;
+      }
       log('[chat] empty reply (attempt ' + attempt + '/' + MAX_ATTEMPTS + ')');
       if (attempt < MAX_ATTEMPTS) {
         log('[chat] waiting 10s, then retrying as a new chat');
         await new Promise((r) => setTimeout(r, 10000));
         delete chatMap[convKey];
         saveChatMap();
-        prompt = buildNewChatPrompt(messages, tools);
+        prompt = buildApiPrompt(messages, tools);
         buf = ''; mode = 'text'; dsmlBuf = ''; textOut = ''; reasoningOut = '';
       }
     }
@@ -838,6 +866,41 @@ async function handleChat(req, res) {
 
 // --------------------------------------------------------------------- helpers
 
+/** 解析「API 格式」回复：{"role":"assistant","content":...,"tool_calls":[...]}。 */
+function parseApiReply(raw) {
+  if (!raw) return null;
+  let text = String(raw).trim();
+  text = text.replace(/^```(?:json)?/i, '').replace(/```$/, '').trim();
+  const i = text.indexOf('{');
+  const j = text.lastIndexOf('}');
+  if (i < 0 || j <= i) return null;
+  let obj;
+  try {
+    obj = JSON.parse(text.slice(i, j + 1));
+  } catch {
+    // 容错：长正文里的转义偶尔写坏，退一步只把 content 字段抠出来
+    const m = /"content"\s*:\s*"((?:[^"\\]|\\.)*)"/.exec(text);
+    if (!m) return null;
+    let content = m[1];
+    try { content = JSON.parse('"' + content + '"'); } catch {}
+    return content ? { content, tool_calls: [] } : null;
+  }
+  if (!obj || typeof obj !== 'object') return null;
+  const content = typeof obj.content === 'string' ? obj.content : '';
+  const list = Array.isArray(obj.tool_calls) ? obj.tool_calls : Array.isArray(obj.toolCalls) ? obj.toolCalls : [];
+  const tool_calls = list
+    .map((tc) => {
+      if (!tc) return null;
+      const f = tc.function || tc;
+      const name = f.name || tc.name;
+      if (!name) return null;
+      let args = f.arguments ?? tc.arguments ?? {};
+      return { name: String(name), arguments: typeof args === 'string' ? args : JSON.stringify(args) };
+    })
+    .filter(Boolean);
+  return { content, tool_calls };
+}
+
 /** 按工具 schema 校验/修补参数：缺 description 时用 command 推导，其余缺必填则判为无效。 */
 function repairToolArgs(call, schemas) {
   const schema = schemas.get(call.name);
@@ -892,13 +955,14 @@ if (process.env.DSW_SELFTEST_PROMPT) {
     for (const c of spec.repair) console.log(JSON.stringify(c, null, 0), '→', JSON.stringify(repairToolArgs(c, schemas)));
     process.exit(0);
   }
-  const prompt = buildNewChatPrompt(spec.messages || [], spec.tools || []);
+  const prompt = buildApiPrompt(spec.messages || [], spec.tools || []);
   const doc = renderTools(spec.tools || [], 'full');
   console.log(JSON.stringify({
     chars: prompt.length,
     tokens: estimateTokens(prompt),
     toolDocChars: doc.length,
     toolDocInPrompt: prompt.includes(doc.slice(0, 80)),
+    hasApiContract: prompt.includes('【回复格式】'),
     tailInPrompt: prompt.includes(String((spec.messages || []).filter((m) => m.role === 'user').pop()?.content || '').slice(0, 60)),
     head: prompt.slice(0, 120),
   }, null, 2));

@@ -3,6 +3,7 @@ export function createStreamParser(onDelta) {
   const fragments = [];
   const emitted = new Map(); // key -> 已经下发给客户端的正文/思考
   let responseMessageId = null;
+  let lastError = null;
   let seq = 0;
 
   const emit = (type, text) => {
@@ -35,6 +36,7 @@ export function createStreamParser(onDelta) {
 
   return {
     responseMessageId: () => responseMessageId,
+    error: () => lastError,
     feed(block) {
       const lines = block.split('\n');
       let data = '';
@@ -44,6 +46,16 @@ export function createStreamParser(onDelta) {
       if (!data || data === '[DONE]') return;
       let obj;
       try { obj = JSON.parse(data); } catch { return; }
+
+      // 站点主动报错（限流、会话失效等）：记下来，交给上层决定是重试还是直接返回错误
+      if (obj && obj.type === 'error' && typeof obj.content === 'string') {
+        lastError = { message: obj.content, finish: obj.finish_reason || null };
+        return;
+      }
+      if (obj && typeof obj.code === 'number' && obj.data && typeof obj.data.biz_code === 'number' && obj.data.biz_code !== 0) {
+        lastError = { message: String(obj.data.biz_msg || 'web error'), finish: null, bizCode: obj.data.biz_code };
+        return;
+      }
 
       if (obj.request_message_id !== undefined && obj.response_message_id !== undefined) {
         responseMessageId = obj.response_message_id;
