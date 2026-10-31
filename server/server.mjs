@@ -209,7 +209,7 @@ function buildApiPrompt(list, tools, opts = {}) {
   const replyContract = () => ({
     role: 'system',
     content: REPLY_JSON
-      ? '你是 OpenAI 兼容服务端。只输出一个 JSON 对象（不要代码块、不要额外文字）：{"role":"assistant","content":"正文或 null","tool_calls":[{"name":"工具名","arguments":{}}]}。不需要工具时省略 tool_calls 或写 []；需要工具时 content 可为 null，arguments 必须包含全部必填参数；需要用户选择时用提问类工具。'
+      ? '你是 OpenAI 兼容服务端。只输出一个 JSON 对象（不要代码块、不要额外文字）：{"role":"assistant","content":"正文或 null","tool_calls":[{"name":"工具名","arguments":{}}]}。不需要工具时省略 tool_calls 或写 []；需要工具时 content 可为 null，arguments 必须包含全部必填参数，且每个参数的类型严格按 tools 里的 schema（数字/布尔用裸值，不要写成字符串）；需要用户选择时用提问类工具。'
       : '你是 OpenAI 兼容服务端。正常回答直接给正文；需要调用工具时只输出：@@TOOL@@\n{"name":"工具名","arguments":{}}\n@@END@@',
   });
 
@@ -937,7 +937,132 @@ function parseApiReply(raw) {
   return { content, tool_calls };
 }
 
-/** 按工具 schema 校验/修补参数：缺 description 时用 command 推导，其余缺必填则判为无效。 */
+/**
+ * 按 JSON Schema 的 type 纠正值的类型（网页模型没有约束解码，常把 60000 写成 "60000"）。
+ * 返回 { ok, value, changed } 或 { ok:false, reason }。
+ */
+function coerceValue(value, schema, path) {
+  if (!schema || typeof schema !== 'object') return { ok: true, value, changed: false };
+  const types = Array.isArray(schema.type) ? schema.type : schema.type ? [schema.type] : [];
+  const where = path || '参数';
+  const asType = (t) => {
+    switch (t) {
+      case 'integer':
+      case 'number': {
+        if (typeof value === 'number' && Number.isFinite(value)) return { ok: true, value };
+        if (typeof value === 'string') {
+          const s = value.trim().replace(/[,_\s]/g, '');
+          if (s !== '' && /^-?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/.test(s)) {
+            const n = Number(s);
+            if (Number.isFinite(n) && (t !== 'integer' || Number.isInteger(n))) return { ok: true, value: n };
+          }
+        }
+        if (typeof value === 'boolean') return { ok: true, value: value ? 1 : 0 };
+        return { ok: false, reason: where + ' 应为 ' + t + '，收到 ' + JSON.stringify(value).slice(0, 40) };
+      }
+      case 'boolean': {
+        if (typeof value === 'boolean') return { ok: true, value };
+        if (typeof value === 'string') {
+          const s = value.trim().toLowerCase();
+          if (['true', 'yes', '1', 'on'].includes(s)) return { ok: true, value: true };
+          if (['false', 'no', '0', 'off'].includes(s)) return { ok: true, value: false };
+        }
+        if (value === 0 || value === 1) return { ok: true, value: !!value };
+        return { ok: false, reason: where + ' 应为 boolean，收到 ' + JSON.stringify(value).slice(0, 40) };
+      }
+      case 'string': {
+        if (typeof value === 'string') return { ok: true, value };
+        if (typeof value === 'number' || typeof value === 'boolean') return { ok: true, value: String(value) };
+        return { ok: false, reason: where + ' 应为 string，收到 ' + JSON.stringify(value).slice(0, 40) };
+      }
+      case 'array': {
+        let v = value;
+        if (typeof v === 'string') {
+          const s = v.trim();
+          if (!s.startsWith('[')) return { ok: false, reason: where + ' 应为 array，收到字符串' };
+          try { v = JSON.parse(s); } catch { return { ok: false, reason: where + ' 的 array 字符串不是合法 JSON' }; }
+        }
+        if (!Array.isArray(v)) return { ok: false, reason: where + ' 应为 array，收到 ' + JSON.stringify(value).slice(0, 40) };
+        const items = [];
+        let changed = v !== value;
+        for (let i = 0; i < v.length; i++) {
+          const r = coerceValue(v[i], schema.items, where + '[' + i + ']');
+          if (!r.ok) return r;
+          if (r.changed) changed = true;
+          items.push(r.value);
+        }
+        return { ok: true, value: items, changed };
+      }
+      case 'object': {
+        let v = value;
+        if (typeof v === 'string') {
+          const s = v.trim();
+          if (!s.startsWith('{')) return { ok: false, reason: where + ' 应为 object，收到字符串' };
+          try { v = JSON.parse(s); } catch { return { ok: false, reason: where + ' 的 object 字符串不是合法 JSON' }; }
+        }
+        if (!v || typeof v !== 'object' || Array.isArray(v)) {
+          return { ok: false, reason: where + ' 应为 object，收到 ' + JSON.stringify(value).slice(0, 40) };
+        }
+        let changed = v !== value;
+        for (const [k, sub] of Object.entries(schema.properties || {})) {
+          if (v[k] === undefined) continue;
+          const r = coerceValue(v[k], sub, where + '.' + k);
+          if (!r.ok) return r;
+          if (r.changed) changed = true;
+          v[k] = r.value;
+        }
+        return { ok: true, value: v, changed };
+      }
+      default:
+        return { ok: true, value, changed: false };
+    }
+  };
+  // 没写 type：按 nullable/枚举/组合器兜底判断，能过就过
+  if (!types.length) {
+    if (Array.isArray(schema.enum) && !schema.enum.includes(value)) {
+      const hit = schema.enum.find((e) => typeof e === 'string' && typeof value === 'string' && e.toLowerCase() === value.toLowerCase());
+      if (hit !== undefined) return { ok: true, value: hit, changed: true };
+    }
+    if (schema.properties) {
+      let changed = false;
+      const obj = { ...value };
+      for (const [k, sub] of Object.entries(schema.properties)) {
+        if (obj[k] === undefined) continue;
+        const r = coerceValue(obj[k], sub, where + '.' + k);
+        if (!r.ok) return r;
+        if (r.changed) changed = true;
+        obj[k] = r.value;
+      }
+      return { ok: true, value: obj, changed };
+    }
+    return { ok: true, value, changed: false };
+  }
+  // type: ["string","null"] 之类：值已经匹配其中一种就不要再改
+  const matches = types.find((t) => {
+    if (t === 'null') return value === null;
+    if (t === 'integer') return typeof value === 'number' && Number.isInteger(value);
+    if (t === 'number') return typeof value === 'number';
+    if (t === 'array') return Array.isArray(value);
+    if (t === 'object') return value && typeof value === 'object' && !Array.isArray(value);
+    return typeof value === t;
+  });
+  if (matches) {
+    // 值类型已经对了，但如果 object 内部还有错类型的字段，仍要往下修
+    const deep = types.find((t) => t === 'object' || t === 'array');
+    if (!deep) return { ok: true, value, changed: false };
+    const asDeep = asType(deep);
+    return asDeep.ok ? asDeep : { ok: true, value, changed: false };
+  }
+  if (value === null && types.includes('null')) return { ok: true, value, changed: false };
+  for (const t of types) {
+    if (t === 'null') continue;
+    const r = asType(t);
+    if (r.ok) return { ok: true, value: r.value, changed: true };
+  }
+  return asType(types[0]);
+}
+
+/** 按工具 schema 校验/修补参数：类型按 schema 纠正，缺 description 时用 command 推导，其余缺必填则判为无效。 */
 function repairToolArgs(call, schemas) {
   const schema = schemas.get(call.name);
   let args;
@@ -954,6 +1079,18 @@ function repairToolArgs(call, schemas) {
   if (Object.keys(args).length === 0 && props.length > 0) {
     return { ok: false, reason: '参数为空，需要 ' + props.slice(0, 6).join(', ') };
   }
+  // 类型纠正：网页模型没有约束解码，容易把数字/布尔写成字符串，或把数组对象写成 JSON 字符串
+  const fixed = [];
+  for (const [k, sub] of Object.entries(schema.properties || {})) {
+    if (args[k] === undefined) continue;
+    const r = coerceValue(args[k], sub, k);
+    if (!r.ok) return { ok: false, reason: r.reason };
+    if (r.changed) {
+      fixed.push(k + ': ' + JSON.stringify(args[k]).slice(0, 30) + ' → ' + JSON.stringify(r.value).slice(0, 30));
+      args[k] = r.value;
+    }
+  }
+  if (fixed.length) log('[tool] coerced args ' + call.name + ': ' + fixed.join('; '));
   const miss = () => required.filter((k) => args[k] === undefined || args[k] === null || args[k] === '');
   for (const k of miss()) {
     if (k === 'description' && typeof args.command === 'string' && args.command.trim()) {

@@ -24,7 +24,7 @@ git+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web.git
 **② 发行版压缩包（镜像，最快）**
 
 ```
-https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/latest/download/dsh-deepseek-web-1.0.10.tgz
+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/latest/download/dsh-deepseek-web-1.0.11.tgz
 ```
 
 **③ 仓库页（镜像浏览）**
@@ -36,7 +36,7 @@ https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web
 > 镜像不可用时，把上面链接里的 `https://gh-proxy.com/` 去掉即可直连 GitHub（官方速度可能较慢）：
 >
 > - 插件 spec：`https://github.com/irerc/dsh-deepseek-web`
-> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/latest/download/dsh-deepseek-web-1.0.10.tgz`
+> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/latest/download/dsh-deepseek-web-1.0.11.tgz`
 
 **不需要任何 API key**：插件自带 provider 配置与本地网关（`127.0.0.1:18081`），装好即用。
 
@@ -131,6 +131,12 @@ bin/cli.mjs           login/accounts/start/stop/status/doctor
 MIT License
 
 ## 更新日志
+
+### v1.0.11
+
+- **工具参数按 schema 自动纠正类型**：网页模型没有约束解码，常把 `timeoutMs: 60000` 写成 `"60000"`、`run_in_background: true` 写成 `"true"`，导致 DSH 报 `invalid arguments: "timeoutMs" must be a number` 并空转重试。
+  现在按 tools 里的 JSON Schema 逐层纠正：数字字符串 → 数字（含科学计数法）、`"true"`/`"false"` → 布尔、JSON 字符串 → 数组/对象，嵌套对象与数组元素同样处理；纠正后再做必填校验，日志里会打印 `[tool] coerced args`。
+- 回复契约里补一句「参数类型严格按 schema，数字/布尔写裸值」，从源头减少此类错误。
 
 ### v1.0.10
 
