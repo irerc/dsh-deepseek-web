@@ -24,7 +24,7 @@ git+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web.git
 **② 发行版压缩包（镜像，最快）**
 
 ```
-https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.31/dsh-deepseek-web-1.0.31.tgz
+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.32/dsh-deepseek-web-1.0.32.tgz
 ```
 
 **③ 仓库页（镜像浏览）**
@@ -36,7 +36,7 @@ https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web
 > 镜像不可用时，把上面链接里的 `https://gh-proxy.com/` 去掉即可直连 GitHub（官方速度可能较慢）：
 >
 > - 插件 spec：`https://github.com/irerc/dsh-deepseek-web`
-> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.31/dsh-deepseek-web-1.0.31.tgz`
+> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.32/dsh-deepseek-web-1.0.32.tgz`
 
 **不需要任何 API key**：插件自带 provider 配置与本地网关（`127.0.0.1:18081`），装好即用。
 
@@ -131,6 +131,11 @@ bin/cli.mjs           login/accounts/start/stop/status/doctor
 MIT License
 
 ## 更新日志
+
+### v1.0.32
+
+- **安装后明确提示需要重启**：插件会比对「磁盘上装好的版本」和「正在运行的版本」，只要不一致，设置页顶部就出现橙色横幅：「已安装 vX，需要重启 DSH 后生效（当前运行 vY）」，并写明重启方法。装完即刻出现，不会再让人以为没生效。
+- **「维护」拆成两块**：上半「版本更新」（检查更新 / 复制链接 / 安装），下半「数据与还原」（清空用量 / 重置设置），中间分隔线，更新和还原不再混在同一排按钮里。
 
 ### v1.0.31
 
