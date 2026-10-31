@@ -209,7 +209,7 @@ function buildApiPrompt(list, tools, opts = {}) {
   const replyContract = () => ({
     role: 'system',
     content: REPLY_JSON
-      ? '你是 OpenAI 兼容服务端。只输出一个 JSON 对象（不要代码块、不要额外文字）：{"role":"assistant","content":"正文或 null","tool_calls":[{"name":"工具名","arguments":{}}]}。不需要工具时省略 tool_calls 或写 []；需要工具时 content 可为 null，arguments 必须包含全部必填参数，且每个参数的类型严格按 tools 里的 schema（数字/布尔用裸值，不要写成字符串）；需要用户选择时用提问类工具。'
+      ? '回复以 JSON 对象承载：content 写正文（或 null），tool_calls 写工具调用及其 arguments。调用工具时 arguments 要含全部必填参数，类型按 tools 的 schema（数字/布尔用裸值）；不需要工具就不写 tool_calls。不要代码块，不要额外说明。'
       : '你是 OpenAI 兼容服务端。正常回答直接给正文；需要调用工具时只输出：@@TOOL@@\n{"name":"工具名","arguments":{}}\n@@END@@',
   });
 
@@ -648,7 +648,12 @@ async function handleChat(req, res) {
       }
       return;
     }
-    if (parsed.content) {
+    // 调工具的轮次里，模型常先写一句「我先看看 XX / 继续排查 YY」再调工具。
+    // 这是执行过程中的思考输出，设置里可以关掉（默认关），关掉后只留工具调用本身。
+    const narrationOff = parsed.tool_calls.length > 0 && loadConfig().showToolNarration !== true;
+    if (parsed.content && narrationOff) {
+      log('[json] hidden process narration before tool call (' + parsed.content.trim().length + ' chars)');
+    } else if (parsed.content) {
       textOut += parsed.content;
       if (stream) {
         if (!headersSent) sendChunk({ role: 'assistant', content: '' });
@@ -819,7 +824,7 @@ async function handleChat(req, res) {
         delete chatMap[convKey];
         saveChatMap();
         prompt = buildApiPrompt(messages, tools);
-        buf = ''; mode = 'text'; dsmlBuf = ''; textOut = ''; reasoningOut = '';
+        buf = ''; mode = 'text'; dsmlBuf = ''; textOut = ''; reasoningOut = ''; dsmlToEnd = false;
       }
     }
 

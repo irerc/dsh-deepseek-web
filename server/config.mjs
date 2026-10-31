@@ -13,6 +13,7 @@ export const DEFAULTS = {
   sendGapMs: 1200, // 同一账号两次请求的最小间隔
   maxConcurrency: 4, // 全局并发上限
   perAccountConcurrency: 2,
+  showToolNarration: false, // 调工具的轮次是否显示模型前面的说明文字（大号白字那种「我先看看 XX」）
   defaultAccount: null, // 不指定时按账号池轮询
   port: Number(process.env.DEEPSEEK_BRIDGE_PORT || 18081),
   // 设置页卡片显示顺序（由设置页最下方的「页面设置」修改）
@@ -71,6 +72,7 @@ export function saveConfig(patch) {
   clean.idleStopMs = Math.max(60000, Math.min(24 * 3600 * 1000, Number(clean.idleStopMs) || DEFAULTS.idleStopMs));
   clean.maxConcurrency = Math.max(1, Math.min(16, Number(clean.maxConcurrency) || DEFAULTS.maxConcurrency));
   clean.autoStart = clean.autoStart !== false;
+  clean.showToolNarration = clean.showToolNarration === true;
   clean.sectionOrder = normalizeSectionOrder(clean.sectionOrder);
   fs.writeFileSync(CONFIG_FILE, JSON.stringify(clean, null, 2), { mode: 0o600 });
   return clean;
