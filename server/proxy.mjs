@@ -65,18 +65,25 @@ const INJECT = `
   if (_fetch) {
     window.fetch = function (input, init) {
       var url = typeof input === 'string' ? input : (input && input.url) || '';
+      var t0 = Date.now();
+      var slow = setTimeout(function () { tip('请求超时 15s 仍未返回：' + url); }, 15000);
       return _fetch.call(this, input, init).then(function (r) {
+        clearTimeout(slow);
         if (!r.ok) tip('API ' + r.status + ' ' + url);
-        // 登录/注册失败时把上游真实原因带出来，便于判断是被风控还是验证码问题
-        if (/\/users\/(login|register|create_email_verification_code|check_verification_code)/.test(url) && r.ok) {
+        // 登录/注册这类接口：把上游真实原因摊开，方便判断是风控、验证码过期还是字段问题
+        if (/\/api\/v0\/users\//.test(url)) {
           try {
             r.clone().text().then(function (t) {
-              if (t && t.indexOf('"code":0') < 0) tip('登录接口返回：' + String(t).slice(0, 300));
+              if (!t) return;
+              if (t.indexOf('"code":0') < 0 || /"biz_code":[1-9]/.test(t)) {
+                tip('服务端返回（' + url.split('?')[0] + '）：' + String(t).slice(0, 300));
+              }
             }, function () {});
           } catch (e) {}
         }
         return r;
       }, function (e) {
+        clearTimeout(slow);
         tip('网络失败 ' + url + ' · ' + (e && e.message ? e.message : e));
         throw e;
       });
@@ -144,7 +151,7 @@ const INJECT = `
   function tip(msg) {
     try { console.log('[dsweb]', msg); } catch (e) {}
     var el = document.getElementById('__dsweb_tip');
-    if (!el) { el = document.createElement('div'); el.id = '__dsweb_tip'; el.style.cssText = 'position:fixed;left:8px;bottom:8px;right:8px;z-index:99999;font:12px monospace;background:rgba(0,0,0,.82);color:#ffd479;padding:8px;border-radius:8px;max-height:35vh;overflow:auto;white-space:pre-wrap'; document.body.appendChild(el); }
+    if (!el) { el = document.createElement('div'); el.id = '__dsweb_tip'; el.style.cssText = 'position:fixed;left:8px;bottom:8px;right:8px;z-index:99998;font:12px monospace;background:rgba(0,0,0,.82);color:#ffd479;padding:8px;border-radius:8px;max-height:35vh;overflow:auto;white-space:pre-wrap'; document.body.appendChild(el); }
     el.textContent += (el.textContent ? '\\n' : '') + msg;
   }
   window.addEventListener('error', function (e) {
@@ -192,8 +199,37 @@ const INJECT = `
 })();
 </script>
 <div id="__dsweb_tip" style="position:fixed;left:8px;bottom:8px;z-index:99999;font:12px sans-serif;background:rgba(0,0,0,.75);color:#fff;padding:6px 10px;border-radius:8px;pointer-events:none">登录后会自动保存到 DSH，无需复制 token</div>
-<a href="/sign_up" style="position:fixed;right:8px;bottom:46px;z-index:99999;font:12px sans-serif;background:rgba(80,140,255,.22);color:#cfe0ff;border:1px solid rgba(120,170,255,.5);padding:6px 10px;border-radius:8px;text-decoration:none">没有账号？邮箱注册</a>
-<button onclick="(function(){try{localStorage.removeItem('userToken');localStorage.clear();}catch(e){};alert('已退出本页登录（插件里的 token 不受影响）');location.href='/sign_in';})()" style="position:fixed;right:8px;bottom:8px;z-index:99999;font:12px sans-serif;background:rgba(255,255,255,.12);color:#fff;border:1px solid rgba(255,255,255,.25);padding:6px 10px;border-radius:8px">退出本页登录</button>
+<div style="position:fixed;right:8px;top:64px;z-index:99999;display:flex;flex-direction:column;gap:6px;align-items:flex-end">
+  <a id="__dsweb_signup" href="/sign_up" style="font:12px sans-serif;background:rgba(80,140,255,.22);color:#cfe0ff;border:1px solid rgba(120,170,255,.5);padding:6px 10px;border-radius:8px;text-decoration:none">没有账号？邮箱注册</a>
+  <button onclick="(function(){try{localStorage.removeItem('userToken');localStorage.clear();}catch(e){};alert('已退出本页登录（插件里的 token 不受影响）');location.href='/sign_in';})()" style="font:12px sans-serif;background:rgba(255,255,255,.12);color:#fff;border:1px solid rgba(255,255,255,.25);padding:6px 10px;border-radius:8px">退出本页登录</button>
+</div>
+<script>
+(function () {
+  var hint = null;
+  function syncAuthUi() {
+    try {
+      var onSignUp = location.pathname.indexOf('/sign_up') === 0;
+      var a = document.getElementById('__dsweb_signup');
+      if (a) a.style.display = onSignUp ? 'none' : '';
+      // 注册页会做人机验证，本地反代域（127.0.0.1）过不了验证时按钮会一直转圈。
+      // 这里给一条可用替代路径：登录页用邮箱验证码，首次登录即自动创建账号。
+      if (onSignUp && !hint) {
+        hint = document.createElement('div');
+        hint.style.cssText = 'position:fixed;left:8px;top:64px;right:120px;z-index:99997;font:12px sans-serif;background:rgba(255,180,60,.14);color:#ffd479;border:1px solid rgba(255,180,60,.45);padding:8px 10px;border-radius:8px;line-height:1.6';
+        hint.innerHTML = '注册按钮一直转圈？多半是站点人机验证无法在本地反代域名下完成。<br>' +
+          '请点「返回登录」，用 <b>邮箱验证码</b> 登录：第一次登录会自动创建账号，效果与注册相同。';
+        document.body.appendChild(hint);
+      } else if (!onSignUp && hint) {
+        hint.remove();
+        hint = null;
+      }
+    } catch (e) {}
+  }
+  syncAuthUi();
+  window.addEventListener('popstate', syncAuthUi);
+  setInterval(syncAuthUi, 1200);
+})();
+</script>
 `;
 
 function filterRequestHeaders(headers) {

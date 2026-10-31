@@ -24,7 +24,7 @@ git+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web.git
 **② 发行版压缩包（镜像，最快）**
 
 ```
-https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.22/dsh-deepseek-web-1.0.22.tgz
+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.23/dsh-deepseek-web-1.0.23.tgz
 ```
 
 **③ 仓库页（镜像浏览）**
@@ -36,7 +36,7 @@ https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web
 > 镜像不可用时，把上面链接里的 `https://gh-proxy.com/` 去掉即可直连 GitHub（官方速度可能较慢）：
 >
 > - 插件 spec：`https://github.com/irerc/dsh-deepseek-web`
-> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.22/dsh-deepseek-web-1.0.22.tgz`
+> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.23/dsh-deepseek-web-1.0.23.tgz`
 
 **不需要任何 API key**：插件自带 provider 配置与本地网关（`127.0.0.1:18081`），装好即用。
 
@@ -131,6 +131,12 @@ bin/cli.mjs           login/accounts/start/stop/status/doctor
 MIT License
 
 ## 更新日志
+
+### v1.0.23
+
+- **注册页可用性提示**：`/sign_up` 会做人机验证，在本地反代域名（127.0.0.1）下常常过不了，表现是「注册」按钮一直转圈。现在注册页顶部会提示改用**邮箱验证码登录**（首次登录自动创建账号，效果等同注册），并给出返回登录的路径。
+- **登录按钮不再遮挡页面**：注入的「没有账号？邮箱注册 / 退出本页登录」移到右上角竖排，注册页自动隐藏注册入口，不再压在「返回登录」上。
+- **登录/注册失败有据可查**：所有 `/api/v0/users/*` 请求只要返回的 code 非 0（或 biz_code 非 0），页面底部就会显示服务端原文；请求超过 15 秒没返回也会提示。
 
 ### v1.0.22
 
