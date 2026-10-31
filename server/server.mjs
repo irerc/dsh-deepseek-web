@@ -406,7 +406,8 @@ function estimateTokens(text) {
   if (!text) return 0;
   let cjk = 0;
   for (const ch of text) if (/[\u4e00-\u9fff\u3040-\u30ff]/.test(ch)) cjk++;
-  return Math.ceil(cjk * 0.7 + (text.length - cjk) / 3.6);
+  // 系数按 DeepSeek 网页端真实分词器校准（实测中文 ≈1.9 字/token、英文 ≈3.8 token 比）
+  return Math.ceil(cjk * 0.52 + (text.length - cjk) / 3.8);
 }
 
 // ------------------------------------------------------------- conversation map
@@ -762,10 +763,11 @@ async function handleChat(req, res) {
     if (heldBackslash) { emitText(heldBackslash); heldBackslash = ''; }
   };
 
+  let parser = null; // 用量统计（真实 token 数）在 try 之外读，这里提前声明
   try {
     const t0 = Date.now();
     log('[chat] send model=' + modelId + ' msgs=' + messages.length + ' tools=' + tools.length + ' conv=' + convKey.slice(0, 8) + ' session=' + (prev?.sessionId ? prev.sessionId.slice(0, 8) : 'new') + ' thinking=' + model.thinking);
-    const parser = createStreamParser((d) => {
+    parser = createStreamParser((d) => {
       if (process.env.DSW_DEBUG_STREAM) log('[stream] ' + (d.text ? 'text(' + d.text.length + '):' + JSON.stringify(d.text.slice(0, 80)) : 'reasoning(' + String(d.reasoning || '').length + ')'));
       if (d.text) flushToolsFrom(d.text);
       else if (d.reasoning) {
@@ -791,7 +793,8 @@ async function handleChat(req, res) {
           thinking: model.thinking,
           sessionId: useSession,
           parentId: useParent,
-          preferAccount: accountLabel || null,
+          // 网页会话属于某个账号，续聊时必须回到同一个账号，否则上游会报 invalid chat session id
+          preferAccount: accountLabel || prev?.accountId || null,
           onDelta: (block) => {
             if (process.env.DSW_DEBUG_RAW) log('[raw] ' + JSON.stringify(String(block).slice(0, 300)));
             parser.feed(block);
@@ -806,6 +809,18 @@ async function handleChat(req, res) {
       if (textOut || calls.length) break;
       const upstreamError = parser.error();
       if (upstreamError) {
+        // 网页会话在别的账号/已被站点回收：换新会话、用完整上下文再来一次，别把错误甩给用户
+        const sessionGone = /invalid chat session|session.*(not found|expired)/i.test(String(upstreamError.message || ''));
+        if (sessionGone && attempt < MAX_ATTEMPTS) {
+          log('[chat] web session unusable (' + upstreamError.message + '), retrying with a fresh session');
+          delete chatMap[convKey];
+          saveChatMap();
+          prev = null;
+          continuing = false;
+          prompt = buildApiPrompt(messages, tools);
+          buf = ''; mode = 'text'; dsmlBuf = ''; textOut = ''; reasoningOut = ''; dsmlToEnd = false;
+          continue;
+        }
         // 站点明确报错（限流/会话失效）：不要再盲重重试，直接把原因回给客户端
         log('[chat] upstream error: ' + JSON.stringify(upstreamError));
         if (!headersSent) {
@@ -824,6 +839,8 @@ async function handleChat(req, res) {
         await new Promise((r) => setTimeout(r, 10000));
         delete chatMap[convKey];
         saveChatMap();
+        prev = null;
+        continuing = false;
         prompt = buildApiPrompt(messages, tools);
         buf = ''; mode = 'text'; dsmlBuf = ''; textOut = ''; reasoningOut = ''; dsmlToEnd = false;
       }
@@ -834,6 +851,7 @@ async function handleChat(req, res) {
     const recent = [replyDigest, ...(Array.isArray(prev?.recentReplies) ? prev.recentReplies : prev?.replyDigest ? [prev.replyDigest] : [])];
     const next = {
       sessionId: out.sessionId || prev?.sessionId,
+      accountId: out.accountId || prev?.accountId || null,
       parentId: parser.responseMessageId() ?? prev?.parentId ?? null,
       msgCount: transcript.length,
       digestPrefix: digest,
@@ -865,22 +883,33 @@ async function handleChat(req, res) {
 
   // usage 要按「这次请求真实喂进去的上下文」算，否则 GUI 的上下文仪表会显示成 0%
   const contextParts = [];
+  const tailParts = []; // 最后一条 assistant 之后的内容＝本轮真正新增的部分，不算缓存
+  let tailOpen = false;
   for (const m of messages) {
     if (!m || !m.role) continue;
     const t = typeof m.content === 'string' ? m.content : contentToText(m.content);
     const callsText = Array.isArray(m.tool_calls) ? JSON.stringify(m.tool_calls) : '';
-    contextParts.push(m.role + ': ' + (t || '') + (callsText ? ' ' + callsText : ''));
+    const line = m.role + ': ' + (t || '') + (callsText ? ' ' + callsText : '');
+    contextParts.push(line);
+    if (m.role === 'assistant') { tailParts.length = 0; tailOpen = true; }
+    else if (tailOpen) tailParts.push(line);
   }
   if (tools.length) contextParts.push('tools: ' + JSON.stringify(tools));
+  const hasAssistant = messages.some((m) => m && m.role === 'assistant');
 
-  const promptTokens = estimateTokens(contextParts.join('\n'));
+  // 上游在流里给了真实 token 数（站点自己的分词器，含完整上下文 + 输出），优先用它
+  const upstreamTotal = parser && parser.tokenUsage ? parser.tokenUsage() : 0;
   const completionTokens = estimateTokens(textOut + reasoningOut);
-  // 网页接口不返回 usage / 缓存字段，这里做保守估算：
-  // 续聊且历史前缀没变时，上一轮已经发过的部分视为「缓存命中」，与官方 API 的语义对齐。
-  const prevPromptTokens = Number(prev?.promptTokens || 0);
+  const estimatedPrompt = estimateTokens(contextParts.join('\n'));
+  const promptTokens =
+    upstreamTotal > completionTokens ? Math.max(1, upstreamTotal - completionTokens) : estimatedPrompt;
+
+  // 缓存读取：DeepSeek 的上下文缓存是按「前缀」命中的。同一条对话里，
+  // 除了最后一条 assistant 之后新追加的内容，其余前缀都已经在上下文里了，视为缓存命中。
+  // 全新对话（还没有任何 assistant 消息）没有可命中的前缀，记 0。
+  const tailTokens = estimateTokens(tailParts.join('\n'));
+  const cachedTokens = hasAssistant ? Math.max(0, Math.min(promptTokens - tailTokens, promptTokens)) : 0;
   if (chatMap[convKey]) { chatMap[convKey].promptTokens = promptTokens; saveChatMap(); }
-  const reused = continuing && prevPromptTokens > 0 ? Math.min(prevPromptTokens, promptTokens) : 0;
-  const cachedTokens = Math.max(0, Math.min(reused, promptTokens));
   const usagePayload = {
     prompt_tokens: promptTokens,
     completion_tokens: completionTokens,
@@ -889,6 +918,11 @@ async function handleChat(req, res) {
     prompt_cache_hit_tokens: cachedTokens,
     prompt_cache_miss_tokens: Math.max(0, promptTokens - cachedTokens),
   };
+  log(
+    '[usage] prompt=' + promptTokens + (upstreamTotal ? '(upstream ' + upstreamTotal + ')' : '(est)') +
+      ' completion=' + completionTokens + ' cached=' + cachedTokens +
+      ' hit=' + (promptTokens ? Math.round((cachedTokens / promptTokens) * 1000) / 10 : 0) + '%',
+  );
   const convLabel = (() => {
     const first = messages.find((m) => m && m.role === 'user');
     const text = first ? String(typeof first.content === 'string' ? first.content : contentToText(first.content)) : '';

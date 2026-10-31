@@ -3,6 +3,9 @@ export function createStreamParser(onDelta) {
   const fragments = [];
   const emitted = new Map(); // key -> 已经下发给客户端的正文/思考
   let responseMessageId = null;
+  // 上游真实 token 数：response.accumulated_token_usage（这条回复「上下文 + 输出」的合计，
+  // 站点用自家分词器算的，比按字数估的准得多）
+  let tokenUsage = 0;
   let lastError = null;
   let seq = 0;
 
@@ -36,6 +39,7 @@ export function createStreamParser(onDelta) {
 
   return {
     responseMessageId: () => responseMessageId,
+    tokenUsage: () => tokenUsage,
     error: () => lastError,
     feed(block) {
       const lines = block.split('\n');
@@ -64,6 +68,7 @@ export function createStreamParser(onDelta) {
       const resp = obj?.v?.response;
       if (resp && Array.isArray(resp.fragments)) {
         responseMessageId = resp.message_id ?? responseMessageId;
+        if (Number(resp.accumulated_token_usage) > 0) tokenUsage = Number(resp.accumulated_token_usage);
         fragments.length = 0;
         for (const f of resp.fragments) fragments.push({ id: f.id, type: f.type, content: f.content || '' });
         // 快照可能带已有内容：只把「还没下发过」的部分补发出去
@@ -78,6 +83,14 @@ export function createStreamParser(onDelta) {
         return;
       }
       if (typeof obj.p === 'string') {
+        // 累计 token 数：整块补丁 {"p":"response","o":"BATCH","v":[{"p":"accumulated_token_usage","v":123}, …]}
+        if (obj.p === 'response' && Array.isArray(obj.v)) {
+          for (const sub of obj.v) {
+            if (sub && sub.p === 'accumulated_token_usage' && Number(sub.v) > 0) tokenUsage = Number(sub.v);
+          }
+        }
+        // 也可能直接给 {"p":"response/accumulated_token_usage","o":"SET","v":123}
+        if (obj.p === 'response/accumulated_token_usage' && Number(obj.v) > 0) tokenUsage = Number(obj.v);
         // 整块追加新 fragment：{"p":"response/fragments","o":"APPEND","v":[{type,content,...}]}
         if (obj.p === 'response/fragments' && Array.isArray(obj.v)) {
           for (const f of obj.v) {

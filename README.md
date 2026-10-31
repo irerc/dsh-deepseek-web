@@ -24,7 +24,7 @@ git+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web.git
 **② 发行版压缩包（镜像，最快）**
 
 ```
-https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.32/dsh-deepseek-web-1.0.32.tgz
+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.33/dsh-deepseek-web-1.0.33.tgz
 ```
 
 **③ 仓库页（镜像浏览）**
@@ -36,7 +36,7 @@ https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web
 > 镜像不可用时，把上面链接里的 `https://gh-proxy.com/` 去掉即可直连 GitHub（官方速度可能较慢）：
 >
 > - 插件 spec：`https://github.com/irerc/dsh-deepseek-web`
-> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.32/dsh-deepseek-web-1.0.32.tgz`
+> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.33/dsh-deepseek-web-1.0.33.tgz`
 
 **不需要任何 API key**：插件自带 provider 配置与本地网关（`127.0.0.1:18081`），装好即用。
 
@@ -131,6 +131,14 @@ bin/cli.mjs           login/accounts/start/stop/status/doctor
 MIT License
 
 ## 更新日志
+
+### v1.0.33
+
+- **token 统计改用上游真实数字**：网页接口的流里其实带了 `accumulated_token_usage`（站点自己分词算出来的「上下文 + 输出」合计），以前没用上、全靠按字数估。现在优先用它反推 `prompt_tokens`，上下文越大越准，不会再把长对话的输入量估小。
+- **缓存读取修对了**：以前只认「插件自己记的那条网页会话还在不在」，一旦换了账号、站点回收了会话、或者 DSH 压缩历史换了指纹，缓存读取就直接掉成 0。现在按前缀语义算：除了最后一条 assistant 之后新追加的内容，其余都已经在上下文里，算缓存命中；全新对话（还没有 assistant 消息）才记 0。长对话实测能到 99%+，和官方 API 的 `prompt_cache_hit_tokens` 语义一致。
+- **续聊固定回到同一个账号**：网页会话属于某个账号，多账号轮换时第二句换了号，上游会回 `invalid chat session id`。现在每条对话都会记住自己的账号，续聊照着回；万一那个号不可用，会自动换新会话 + 完整上下文重试一次，不再把 502 甩给用户。
+- **分词系数校准**：中文 0.52、英文 1/3.8，跟着 DeepSeek 真实分词器走（原来 0.7 把中文估多了三成）。
+- **设置页用量卡片显示缓存读取**：`总 tokens / 输入 / 输出 / 缓存读取（命中率）/ 轮次`，各对话详情里也加了「缓存」一列。
 
 ### v1.0.32
 
