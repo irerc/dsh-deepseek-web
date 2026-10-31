@@ -129,26 +129,8 @@ function describeToolCalls(m) {
 }
 
 // 要求模型「按 API 的 assistant 消息格式」回复，桥接器再翻译成 OpenAI 的响应体。
-const API_CONTRACT = [
-  '',
-  '【回复格式】你就是这个 OpenAI 兼容接口的服务端。只输出一个 JSON 对象，不要代码块、不要任何额外文字：',
-  '{"role":"assistant","content":"给用户的正文，可为 null","tool_calls":[{"name":"工具名","arguments":{...}}]}',
-  '- 不需要工具：省略 tool_calls 或写 []，content 写 Markdown 正文（真实换行）；',
-  '- 需要工具：content 可为 null，arguments 必须包含该工具的全部必填参数；',
-  '- 需要用户选择/补充信息时，用提问类工具（如 ask_user_question）作为 tool_calls。',
-].join('\n');
-
 // 万一 JSON 回复在某类账号上不稳，可以用 DSW_REPLY_FORMAT=text 切回「正文 + @@TOOL@@ 标记」协议
 const REPLY_JSON = process.env.DSW_REPLY_FORMAT !== 'text';
-const TEXT_CONTRACT = [
-  '',
-  '【回复格式】正常回答时直接写正文（Markdown，真实换行）；',
-  '需要调用工具时，整条回复只输出一个块，块外不要写任何文字：',
-  '@@TOOL@@',
-  '{"name":"工具名","arguments":{"参数名":"值"}}',
-  '@@END@@',
-].join('\n');
-
 /** 把 messages[] 渲染成 API 请求体的样子（role / tool_calls / tool_call_id 都保留）。 */
 function renderApiMessages(list, pick) {
   const out = [];
@@ -222,16 +204,27 @@ function buildApiPrompt(list, tools, opts = {}) {
       })
       .filter(Boolean);
 
+  // 请求体保持「纯 API JSON」：任何说明都作为一条 system 消息放进 messages 里，
+  // 不要在 JSON 外面加中文包装。
+  const replyContract = () => ({
+    role: 'system',
+    content: REPLY_JSON
+      ? '你是 OpenAI 兼容服务端。只输出一个 JSON 对象（不要代码块、不要额外文字）：{"role":"assistant","content":"正文或 null","tool_calls":[{"name":"工具名","arguments":{}}]}。不需要工具时省略 tool_calls 或写 []；需要工具时 content 可为 null，arguments 必须包含全部必填参数；需要用户选择时用提问类工具。'
+      : '你是 OpenAI 兼容服务端。正常回答直接给正文；需要调用工具时只输出：@@TOOL@@\n{"name":"工具名","arguments":{}}\n@@END@@',
+  });
+
   const build = (part, mode) => {
     const messages = [];
     if (sys.length && !opts.skipSystem) messages.push(...sys);
     for (const m of part) messages.push(toApiMessage(m));
+    messages.push(replyContract());
     const body = { model: 'deepseek-web', messages };
     const toolsJson = buildTools(mode);
-    if (toolsJson.length) body.tools = toolsJson;
-    const head = opts.resume ? '【API 请求体 · 续】前面同一条会话里的消息略过，这里是新增的：' : '【API 请求体】';
-    const parts = [head, JSON.stringify(body), REPLY_JSON ? API_CONTRACT : TEXT_CONTRACT];
-    return parts.join('\n\n');
+    if (toolsJson.length) {
+      body.tools = toolsJson;
+      body.tool_choice = 'auto';
+    }
+    return JSON.stringify(body);
   };
 
   let slice = convo;
@@ -1010,7 +1003,6 @@ if (process.env.DSW_SELFTEST_PROMPT) {
     tokens: estimateTokens(prompt),
     toolDocChars: doc.length,
     toolDocInPrompt: prompt.includes(doc.slice(0, 80)),
-    hasApiContract: prompt.includes('【回复格式】'),
     tailInPrompt: prompt.includes(String((spec.messages || []).filter((m) => m.role === 'user').pop()?.content || '').slice(0, 60)),
     head: prompt.slice(0, 120),
   }, null, 2));
