@@ -24,7 +24,7 @@ git+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web.git
 **② 发行版压缩包（镜像，最快）**
 
 ```
-https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.30/dsh-deepseek-web-1.0.30.tgz
+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.31/dsh-deepseek-web-1.0.31.tgz
 ```
 
 **③ 仓库页（镜像浏览）**
@@ -36,7 +36,7 @@ https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web
 > 镜像不可用时，把上面链接里的 `https://gh-proxy.com/` 去掉即可直连 GitHub（官方速度可能较慢）：
 >
 > - 插件 spec：`https://github.com/irerc/dsh-deepseek-web`
-> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.30/dsh-deepseek-web-1.0.30.tgz`
+> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.31/dsh-deepseek-web-1.0.31.tgz`
 
 **不需要任何 API key**：插件自带 provider 配置与本地网关（`127.0.0.1:18081`），装好即用。
 
@@ -131,6 +131,11 @@ bin/cli.mjs           login/accounts/start/stop/status/doctor
 MIT License
 
 ## 更新日志
+
+### v1.0.31
+
+- **安装链接可以直接复制**：Release 说明里的安装地址改成代码块（GitHub 自带复制按钮），不再是被自动识别成超链接、换行后没法选中的样子。
+- **插件界面加「复制链接」**：查到新版本时，「维护」卡片里多一个「复制链接」（复制 gh-proxy 镜像地址，一键粘贴到别的设备）；「关于」卡片的仓库地址旁边也能一键复制。
 
 ### v1.0.30
 
