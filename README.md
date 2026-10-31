@@ -1,7 +1,7 @@
 # dsh-deepseek-web
 
-[![GitHub stars](https://img.shields.io/github/stars/wsxuyue/dsh-deepseek-web?style=social)](https://github.com/wsxuyue/dsh-deepseek-web/stargazers)
-[![Release](https://img.shields.io/github/v/release/wsxuyue/dsh-deepseek-web)](https://github.com/wsxuyue/dsh-deepseek-web/releases/latest)
+[![GitHub stars](https://img.shields.io/github/stars/irerc/dsh-deepseek-web?style=social)](https://github.com/irerc/dsh-deepseek-web/stargazers)
+[![Release](https://img.shields.io/github/v/release/irerc/dsh-deepseek-web)](https://github.com/irerc/dsh-deepseek-web/releases/latest)
 
 把 **chat.deepseek.com 网页版** 包成 OpenAI 兼容接口的 DeepSeek Harness 插件。如果它帮你省下了 API 费用，欢迎点个 **Star** ⭐
 
@@ -18,25 +18,25 @@
 **① 粘贴到 DSH「插件 → 安装插件」（镜像）**
 
 ```
-git+https://gh-proxy.com/https://github.com/wsxuyue/dsh-deepseek-web.git
+git+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web.git
 ```
 
 **② 发行版压缩包（镜像，最快）**
 
 ```
-https://gh-proxy.com/https://github.com/wsxuyue/dsh-deepseek-web/releases/latest/download/dsh-deepseek-web-1.0.9.tgz
+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/latest/download/dsh-deepseek-web-1.0.10.tgz
 ```
 
 **③ 仓库页（镜像浏览）**
 
 ```
-https://gh-proxy.com/https://github.com/wsxuyue/dsh-deepseek-web
+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web
 ```
 
 > 镜像不可用时，把上面链接里的 `https://gh-proxy.com/` 去掉即可直连 GitHub（官方速度可能较慢）：
 >
-> - 插件 spec：`https://github.com/wsxuyue/dsh-deepseek-web`
-> - 压缩包：`https://github.com/wsxuyue/dsh-deepseek-web/releases/latest/download/dsh-deepseek-web-1.0.9.tgz`
+> - 插件 spec：`https://github.com/irerc/dsh-deepseek-web`
+> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/latest/download/dsh-deepseek-web-1.0.10.tgz`
 
 **不需要任何 API key**：插件自带 provider 配置与本地网关（`127.0.0.1:18081`），装好即用。
 
@@ -131,6 +131,12 @@ bin/cli.mjs           login/accounts/start/stop/status/doctor
 MIT License
 
 ## 更新日志
+
+### v1.0.10
+
+- **仓库迁移**：GitHub 用户名由 `wsxuyue` 改为 `irerc`，仓库地址变为 `https://github.com/irerc/dsh-deepseek-web`。
+  旧的 `wsxuyue` 链接会被 GitHub 自动 301 跳转到新地址，已安装的用户无需重装。
+- 安装命令、徽章、`package.json` 的 repository/homepage/issues 与插件「关于」页链接全部同步为新地址。
 
 ### v1.0.9
 
