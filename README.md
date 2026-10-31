@@ -24,7 +24,7 @@ git+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web.git
 **② 发行版压缩包（镜像，最快）**
 
 ```
-https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/latest/download/dsh-deepseek-web-1.0.11.tgz
+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/latest/download/dsh-deepseek-web-1.0.12.tgz
 ```
 
 **③ 仓库页（镜像浏览）**
@@ -36,7 +36,7 @@ https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web
 > 镜像不可用时，把上面链接里的 `https://gh-proxy.com/` 去掉即可直连 GitHub（官方速度可能较慢）：
 >
 > - 插件 spec：`https://github.com/irerc/dsh-deepseek-web`
-> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/latest/download/dsh-deepseek-web-1.0.11.tgz`
+> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/latest/download/dsh-deepseek-web-1.0.12.tgz`
 
 **不需要任何 API key**：插件自带 provider 配置与本地网关（`127.0.0.1:18081`），装好即用。
 
@@ -131,6 +131,14 @@ bin/cli.mjs           login/accounts/start/stop/status/doctor
 MIT License
 
 ## 更新日志
+
+### v1.0.12
+
+- **大幅减少「上下文已压缩」的频率**：DSH 的自动压缩阈值是
+  `min(窗口×0.8, 窗口 − 回复预留 − 65536)`，而默认 headroom 固定 65536。之前窗口声明 131072、回复预留 32768，
+  阈值只剩 **32768 token** —— 每多几轮就压一次，还常常只压掉 1 条记录（约 3~4k token），上下文被反复切碎。
+  现在改为声明窗口 196608（192K）、回复预留 16384，阈值抬到 **约 114688 token**，压缩频率降到原来的 1/3.5。
+- 插件自身的 prompt 预算同步放宽到 **118K token / 330K 字符**（仍低于网页版真实 128K 上限），避免刚放宽阈值就被插件自己截断。
 
 ### v1.0.11
 

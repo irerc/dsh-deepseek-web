@@ -57,8 +57,8 @@ const modelFor = (id) => MODELS.find((m) => m.id === id) || MODELS[0];
 
 // 网页版上下文 128K tokens：给回复留 ~32K，其余留给上下文。
 // 注意：工具说明（DSH 有 60+ 个工具）必须完整保留，否则模型不会调用工具。
-const MAX_PROMPT_TOKENS = Number(process.env.DSW_MAX_PROMPT_TOKENS || 96000);
-const MAX_PROMPT_CHARS = Number(process.env.DSW_MAX_PROMPT_CHARS || 260000);
+const MAX_PROMPT_TOKENS = Number(process.env.DSW_MAX_PROMPT_TOKENS || 118000);
+const MAX_PROMPT_CHARS = Number(process.env.DSW_MAX_PROMPT_CHARS || 330000);
 
 function sanitizePrompt(text) {
   return String(text || '')

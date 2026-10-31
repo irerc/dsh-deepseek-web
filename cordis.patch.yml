@@ -17,16 +17,22 @@
         # 新设备安装后无需任何密钥即可使用。
         headers:
           authorization: Bearer dsh-deepseek-web
-        defaultContextWindow: 131072
-        defaultMaxTokens: 32768
+        # 网页版真实窗口约 128K。DSH 的自动压缩阈值 =
+        # min(窗口×0.8, 窗口 − 回复预留 − headroom)，而 headroom 默认 65536：
+        # 窗口写 131072、预留 32768 时阈值只剩 32768 token，会一两轮就压一次。
+        # 这里把声明窗口放到 192K、回复预留 16384，阈值抬到约 114688，压缩频率降为原来的 1/3.5；
+        # 真发出去的 prompt 仍由插件自己的预算（约 118K token）兜底，不会超过网页版真实上限。
+        defaultContextWindow: 196608
+        defaultMaxTokens: 16384
         models:
           - id: deepseek-chat
             name: DeepSeek-V4(网页版·快速)
-            contextWindow: 131072
-            maxTokens: 32768
+            contextWindow: 196608
+            maxTokens: 16384
             input: [text]
           - id: deepseek-reasoner
             name: DeepSeek-V4(网页版·深度思考)
-            contextWindow: 131072
-            maxTokens: 32768
+            contextWindow: 196608
+            maxTokens: 16384
             input: [text]
+
