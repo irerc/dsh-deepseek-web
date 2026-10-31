@@ -16,13 +16,14 @@ function readUsage() {
     return { total: { prompt: 0, completion: 0, cached: 0, turns: 0 }, conversations: {} };
   }
 }
-function addUsage(convKey, prompt, completion, cached) {
+function addUsage(convKey, prompt, completion, cached, label) {
   const doc = readUsage();
   doc.total.prompt += prompt;
   doc.total.completion += completion;
   doc.total.cached += cached;
   doc.total.turns += 1;
   const conv = (doc.conversations[convKey] = doc.conversations[convKey] || { prompt: 0, completion: 0, cached: 0, turns: 0, updatedAt: 0 });
+  if (label) conv.label = String(label).slice(0, 60);
   conv.prompt += prompt;
   conv.completion += completion;
   conv.cached += cached;
@@ -888,7 +889,12 @@ async function handleChat(req, res) {
     prompt_cache_hit_tokens: cachedTokens,
     prompt_cache_miss_tokens: Math.max(0, promptTokens - cachedTokens),
   };
-  try { addUsage(convKey.slice(0, 12), promptTokens, completionTokens, cachedTokens); } catch {}
+  const convLabel = (() => {
+    const first = messages.find((m) => m && m.role === 'user');
+    const text = first ? String(typeof first.content === 'string' ? first.content : contentToText(first.content)) : '';
+    return text.replace(/\s+/g, ' ').trim().slice(0, 40);
+  })();
+  try { addUsage(convKey.slice(0, 12), promptTokens, completionTokens, cachedTokens, convLabel); } catch {}
   // 去重：模型有时会同时吐 DSML 和 @@TOOL@@ 两种格式，会得到完全相同的两个调用
   const seenCalls = new Set();
   const uniqCalls = calls.filter((c) => {

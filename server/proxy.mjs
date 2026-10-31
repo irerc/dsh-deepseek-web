@@ -38,7 +38,19 @@ function logLine(line) {
   } catch {}
 }
 
-const SITE = 'chat.deepseek.com';
+import { loadConfig } from './config.mjs';
+
+const DEFAULT_SITE = 'chat.deepseek.com';
+const REGION_HEADERS = {
+  // 国内：中文界面 + 手机号/微信登录
+  cn: { 'accept-language': 'zh-CN,zh;q=0.9', 'x-client-locale': 'zh_CN', 'x-client-browser-lang': 'zh-CN' },
+  // 海外：英文界面 + 邮箱/Google 登录，可直接注册国外 DeepSeek 账号
+  global: { 'accept-language': 'en-US,en;q=0.9', 'x-client-locale': 'en_US', 'x-client-browser-lang': 'en-US' },
+};
+function siteHost() {
+  const host = String(loadConfig().loginHost || '').trim();
+  return host || DEFAULT_SITE;
+}
 const CDN = 'fe-static.deepseek.com';
 const CDN_PREFIX = '/chat/';
 const UA =
@@ -89,7 +101,7 @@ const INJECT = `
       return (s.src ? s.src.split('/').pop() : 'inline').slice(0, 26);
     });
     var rootLen = root ? root.innerHTML.length : -1;
-    el.textContent = 'ds-web | ' + document.readyState + ' | root子=' + (root ? root.children.length : -1) + ' len=' + rootLen +
+    el.textContent = 'ds-web [__DSW_REGION__] | ' + document.readyState + ' | root子=' + (root ? root.children.length : -1) + ' len=' + rootLen +
       ' | 脚本=' + scripts.length + ' 已载=' + (window.__dsLoaded || 0) + ' 失败=' + (window.__dsErr || 0) +
       (window.__dsErrSrc ? ' [' + String(window.__dsErrSrc).split('/').pop() + ']' : '') + ' | ' + location.pathname;
   }
@@ -171,6 +183,7 @@ const INJECT = `
 })();
 </script>
 <div id="__dsweb_tip" style="position:fixed;left:8px;bottom:8px;z-index:99999;font:12px sans-serif;background:rgba(0,0,0,.75);color:#fff;padding:6px 10px;border-radius:8px;pointer-events:none">登录后会自动保存到 DSH，无需复制 token</div>
+<a href="/sign_up" style="position:fixed;right:8px;bottom:46px;z-index:99999;font:12px sans-serif;background:rgba(80,140,255,.22);color:#cfe0ff;border:1px solid rgba(120,170,255,.5);padding:6px 10px;border-radius:8px;text-decoration:none">没有账号？邮箱注册</a>
 <button onclick="(function(){try{localStorage.removeItem('userToken');localStorage.clear();}catch(e){};alert('已退出本页登录（插件里的 token 不受影响）');location.href='/sign_in';})()" style="position:fixed;right:8px;bottom:8px;z-index:99999;font:12px sans-serif;background:rgba(255,255,255,.12);color:#fff;border:1px solid rgba(255,255,255,.25);padding:6px 10px;border-radius:8px">退出本页登录</button>
 `;
 
@@ -197,9 +210,14 @@ function filterRequestHeaders(headers) {
     if (allow.includes(k.toLowerCase())) out[k] = v;
   }
   out['user-agent'] = UA;
+  // 登录线路：国内 / 海外。站点前端读 x-client-locale 决定语言与可用登录方式，
+  // 想用邮箱注册国外账号就必须让这一步呈现英文登录页。
+  const region = loadConfig().loginRegion || 'auto';
+  const site = siteHost();
+  if (region !== 'auto' && REGION_HEADERS[region]) Object.assign(out, REGION_HEADERS[region]);
   // 站点会校验来源：统一伪装成自己的 origin
-  out.origin = 'https://chat.deepseek.com';
-  out.referer = 'https://chat.deepseek.com/';
+  out.origin = 'https://' + site;
+  out.referer = 'https://' + site + '/';
   return out;
 }
 
@@ -214,7 +232,7 @@ function filterResponseHeaders(headers) {
       continue;
     }
     if (key === 'location') {
-      out.location = String(v).replace(/^https?:\/\/chat\.deepseek\.com/i, '');
+      out.location = String(v).replace(/^https?:\/\/(?:chat\.deepseek\.com|[^/]+)/i, '');
       continue;
     }
     out[k] = v;
@@ -225,7 +243,7 @@ function filterResponseHeaders(headers) {
 export function startLoginProxy({ port = 18090, reportUrl }) {
   const server = http.createServer(async (req, res) => {
     const isCdn = req.url.startsWith('/cdn/');
-    const upstreamHost = isCdn ? CDN : SITE;
+    const upstreamHost = isCdn ? CDN : siteHost();
     const upstreamPath = isCdn ? CDN_PREFIX + req.url.slice('/cdn/'.length) : req.url;
     const target = `https://${upstreamHost}${upstreamPath.startsWith('/') ? upstreamPath : '/' + upstreamPath}`;
     // 先把请求体读完再转发：带 content-length 的定长请求比 chunked 更不容易被 WAF 拒绝
@@ -307,7 +325,8 @@ export function startLoginProxy({ port = 18090, reportUrl }) {
           html = html.replace(/<script([^>]*?)src="([^"]+)"/g, function (m, pre, src) {
             return '<script' + pre + ' data-dsweb="' + src.split('/').pop() + '" onload="window.__dsLoaded=(window.__dsLoaded||0)+1" onerror="window.__dsErr=(window.__dsErr||0)+1;window.__dsErrSrc=this.src" src="' + src + '"';
           });
-          const snippet = INJECT.replace('__DSH_REPORT__', reportUrl);
+          const regionLabel = (loadConfig().loginRegion === 'global' ? '海外' : loadConfig().loginRegion === 'cn' ? '国内' : '自动') + '·' + siteHost();
+          const snippet = INJECT.replace('__DSH_REPORT__', reportUrl).replace('__DSW_REGION__', regionLabel);
           html = html.includes('</body>') ? html.replace('</body>', snippet + '</body>') : html + snippet;
           res.writeHead(up.statusCode || 200, { ...headers, 'content-type': 'text/html; charset=utf-8' });
           res.end(html);

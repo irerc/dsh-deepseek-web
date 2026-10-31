@@ -1,5 +1,6 @@
 // 登录相关：token 校验、邮箱验证码（尽力而为）、游客挑战（自检用）
 import { post, get, classify } from './http.mjs';
+import { loadConfig } from './config.mjs';
 import { deviceId } from './accounts.mjs';
 
 /** 校验一个 userToken 是否有效，返回 { ok, user?, message? } */
@@ -29,7 +30,7 @@ export async function sendEmailCode(email) {
     const res = await post('/api/v0/users/create_email_verification_code', {
       email,
       turnstile_token: null,
-      locale: 'zh_CN',
+      locale: loadConfig().loginRegion === 'global' ? 'en_US' : 'zh_CN',
       shumei_verification: null,
       hcaptcha_token: null,
       device_id: deviceId(),

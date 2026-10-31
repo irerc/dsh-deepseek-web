@@ -24,7 +24,7 @@ git+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web.git
 **② 发行版压缩包（镜像，最快）**
 
 ```
-https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/latest/download/dsh-deepseek-web-1.0.18.tgz
+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/latest/download/dsh-deepseek-web-1.0.19.tgz
 ```
 
 **③ 仓库页（镜像浏览）**
@@ -36,7 +36,7 @@ https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web
 > 镜像不可用时，把上面链接里的 `https://gh-proxy.com/` 去掉即可直连 GitHub（官方速度可能较慢）：
 >
 > - 插件 spec：`https://github.com/irerc/dsh-deepseek-web`
-> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/latest/download/dsh-deepseek-web-1.0.18.tgz`
+> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/latest/download/dsh-deepseek-web-1.0.19.tgz`
 
 **不需要任何 API key**：插件自带 provider 配置与本地网关（`127.0.0.1:18081`），装好即用。
 
@@ -131,6 +131,15 @@ bin/cli.mjs           login/accounts/start/stop/status/doctor
 MIT License
 
 ## 更新日志
+
+### v1.0.19
+
+- **登录线路支持国内 / 海外**：设置 → DeepSeek 网页版 → 添加账号 → 「登录线路」三选一。
+  - **自动**：跟随浏览器语言（默认）。
+  - **国内**：中文登录页，手机号 / 微信 / 邮箱登录。
+  - **海外（邮箱注册）**：英文登录页，可直接用邮箱注册 DeepSeek 海外账号；登录页右下角新增「没有账号？邮箱注册」入口。
+  - 发验证码的 `locale` 也会跟着线路切换（zh_CN / en_US），登录页状态栏会显示当前线路。
+- **对话详情显示对话名称**：用量卡片里的各对话详情不再显示一串哈希 ID，改成该对话第一条用户消息（如「帮我统计一下这个仓库里 mjs 文件的数量…」），最多 40 字；老记录没有名称时仍回退显示 ID。
 
 ### v1.0.18
 
