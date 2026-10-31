@@ -1,0 +1,38 @@
+name: stable tarball
+
+# 每次发版都额外挂一份「名字不带版本号」的安装包，
+# 这样外部列表（如 awesome-dsh-plugin）用
+#   https://github.com/irerc/dsh-deepseek-web/releases/latest/download/dsh-deepseek-web.tgz
+# 永远指向最新的包，不会在下次发版后 404。
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  attach:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Attach version-free copy
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          TAG="${{ github.event.release.tag_name }}"
+          if [ -z "${TAG:-}" ]; then TAG=$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName -q .tagName); fi
+          asset=""
+          for i in $(seq 1 20); do
+            asset=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets -q '.assets[].name' \
+              | grep -E '^dsh-deepseek-web-[0-9]+\.[0-9]+\.[0-9]+\.tgz$' | head -1 || true)
+            [ -n "$asset" ] && break
+            sleep 15
+          done
+          if [ -z "$asset" ]; then echo "versioned tarball not found for $TAG"; exit 1; fi
+          mkdir -p /tmp/rel
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern "$asset" --dir /tmp/rel --clobber
+          cp "/tmp/rel/$asset" /tmp/rel/dsh-deepseek-web.tgz
+          gh release upload "$TAG" /tmp/rel/dsh-deepseek-web.tgz --repo "$GITHUB_REPOSITORY" --clobber
+          echo "attached dsh-deepseek-web.tgz ($asset) to $TAG"
