@@ -30,6 +30,8 @@ export const DEFAULTS = {
   // 设置页里内嵌登录窗口（实验性）：关掉就回到「新标签页打开登录页」的旧行为。
   // 这是内嵌方案的回滚开关，改完立即生效，不需要降级插件版本。
   embedLogin: process.env.DS_EMBED_LOGIN !== '0',
+  // 登录页登录成功时，把表单里的邮箱+密码加密保存到本机（下次自动填表 / token 失效自动重登用）
+  saveLoginCredential: process.env.DS_SAVE_LOGIN_CREDENTIAL !== '0',
   defaultAccount: null, // 不指定时按账号池轮询
   port: Number(process.env.DEEPSEEK_BRIDGE_PORT || 18081),
   // 设置页卡片显示顺序（由设置页最下方的「页面设置」修改）
@@ -114,6 +116,7 @@ export function saveConfig(patch) {
   clean.loginRegion = ['auto', 'cn', 'global'].includes(clean.loginRegion) ? clean.loginRegion : 'auto';
   clean.loginHost = String(clean.loginHost || '').trim().slice(0, 120);
   clean.embedLogin = clean.embedLogin !== false;
+  clean.saveLoginCredential = clean.saveLoginCredential !== false;
   clean.sectionOrder = normalizeSectionOrder(clean.sectionOrder);
   fs.writeFileSync(CONFIG_FILE, JSON.stringify(clean, null, 2), { mode: 0o600 });
   return clean;

@@ -4,9 +4,9 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { STATE_DIR, ensureStateDir } from './config.mjs';
 import { encrypt, decrypt } from './credentials.mjs';
+import { deviceId } from './device.mjs';
 
 const ACCOUNTS_FILE = path.join(STATE_DIR, 'accounts.json');
-const DEVICE_FILE = path.join(STATE_DIR, 'device.json');
 
 let rr = 0;
 
@@ -18,14 +18,8 @@ function readJson(file, fallback) {
   }
 }
 
-export function deviceId() {
-  ensureStateDir();
-  const saved = readJson(DEVICE_FILE, null);
-  if (saved && saved.id) return saved.id;
-  const id = crypto.randomBytes(16).toString('hex');
-  fs.writeFileSync(DEVICE_FILE, JSON.stringify({ id, createdAt: Date.now() }), { mode: 0o600 });
-  return id;
-}
+// 设备身份统一在 server/device.mjs（UUID v4，登录页/密码登录/引擎共用同一个）
+export { deviceId };
 
 export function loadAccounts() {
   ensureStateDir();

@@ -13,6 +13,7 @@ import { fileURLToPath } from 'node:url';
 
 import { loadConfig, STATE_DIR } from './config.mjs';
 import { peekTicket, dropTicket } from './autologin.mjs';
+import { deviceId } from './device.mjs';
 const SID_COOKIE = 'dsweb_sid';
 function jarFile(sid) {
   return path.join(STATE_DIR, 'jar-' + sid.replace(/[^a-zA-Z0-9_-]/g, '') + '.json');
@@ -361,7 +362,21 @@ export function startLoginProxy({ port = 18090, reportUrl }) {
             return '<script' + pre + ' data-dsweb="' + src.split('/').pop() + '" onload="window.__dsLoaded=(window.__dsLoaded||0)+1" onerror="window.__dsErr=(window.__dsErr||0)+1;window.__dsErrSrc=this.src" src="' + src + '"';
           });
           const regionLabel = (loadConfig().loginRegion === 'global' ? '海外' : loadConfig().loginRegion === 'cn' ? '国内' : '自动') + '·' + siteHost();
-          const snippet = INJECT.split('__DSH_REPORT__').join(reportUrl).split('__DSW_REGION__').join(regionLabel);
+          const DEVICE_ID = deviceId();
+          const snippet = INJECT.split('__DSH_REPORT__')
+            .join(reportUrl)
+            .split('__DSW_REGION__')
+            .join(regionLabel)
+            .split('__DSW_DEVICE_ID__')
+            .join(DEVICE_ID);
+          // 在站点自己的脚本之前把设备身份固定成插件的 device id：
+          // 站点前端读 localStorage["deepseek-device-id:chat"]，读不到就随机生成一个 —— 那样每换一次
+          // 浏览器就多出一台「新设备」，同一个账号被当成多设备登录，很容易被风控踢下线。
+          const headSnippet =
+            '<script>(function(){try{localStorage.setItem("deepseek-device-id:chat",' +
+            JSON.stringify(DEVICE_ID) +
+            ');}catch(e){}})();</script>';
+          html = /<head[^>]*>/i.test(html) ? html.replace(/<head([^>]*)>/i, '<head$1>' + headSnippet) : headSnippet + html;
           html = html.includes('</body>') ? html.replace('</body>', snippet + '</body>') : html + snippet;
           res.writeHead(up.statusCode || 200, { ...headers, 'content-type': 'text/html; charset=utf-8' });
           res.end(html);

@@ -13,6 +13,9 @@ import { loadConfig } from './config.mjs';
 import { getCredential, replaceToken, markReloginFailed, listAccounts } from './accounts.mjs';
 
 const cooldownUntil = new Map(); // accountId -> timestamp
+// 同一账号同一时间只允许一次重登：并发请求同时 401 时，如果每个都去登一次，
+// 站点会看到好几次登录、多出会话/设备，反而更容易被判风险。这里合并成一次，结果共享。
+const inflight = new Map(); // accountId -> Promise
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -33,7 +36,20 @@ function isRateError(message) {
  * @param {object} opts { reason: 'chat' | 'check' | 'manual' | 'sweep', quiet }
  * @returns {Promise<{ok:boolean, message?:string, account?:object, needCode?:boolean, noCredential?:boolean, skipped?:boolean}>}
  */
-export async function reloginAccount(id, { reason = 'chat' } = {}) {
+export async function reloginAccount(id, opts = {}) {
+  const key = String(id);
+  const running = inflight.get(key);
+  if (running) return running;
+  const task = reloginOnce(key, opts);
+  inflight.set(key, task);
+  try {
+    return await task;
+  } finally {
+    if (inflight.get(key) === task) inflight.delete(key);
+  }
+}
+
+async function reloginOnce(id, { reason = 'chat' } = {}) {
   const cfg = loadConfig();
   if (cfg.autoRelogin === false && reason !== 'manual') {
     return { ok: false, skipped: true, message: '自动重新登录已关闭' };

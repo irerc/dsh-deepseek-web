@@ -6,12 +6,13 @@
 把 **chat.deepseek.com 网页版** 包成 OpenAI 兼容接口的 DeepSeek Harness 插件。如果它帮你省下了 API 费用，欢迎点个 **Star** ⭐
 
 - **不需要浏览器**：Node 直连网页接口（PoW 用站点自带的 wasm 在本地算），因此在 Android/proot 容器里也能跑。
+- **设备身份统一（不容易被风控踢下线）**：站点用 `x-device-id`（UUID v4）+ `localStorage["deepseek-device-id:chat"]` 认设备。插件现在让「密码登录 / 内嵌登录页 / 引擎请求」共用同一个稳定的 UUID，同一个账号在站点看来始终是同一台设备；并发 401 的重登也会合并成一次，避免重复登录把自己挤掉。
 - **多账号**：轮询 + 429 冷却 + 401 自动切换，设置界面可增删；支持邮箱密码、内嵌登录窗口、系统浏览器登录、**Apple ID 登录（实验）**，被站点禁言/封号的账号会自动避让。
 - **内嵌登录窗口（实验）**：不用再切浏览器 —— 在设置页「添加账号」里点「在插件里登录（内嵌窗口）」，真实的 DeepSeek 登录页直接嵌在设置页里（同机独立端口镜像，cookie 只存在本机），登录成功后 token 自动回填、窗口自动关闭；账号行也保留「内嵌登录 / 浏览器登录」两条路，另有「用系统浏览器打开」兜底。**账号行的「打开登录页」也走本机代理**（不是 chat.deepseek.com 官网），登录成功后 token 会自动回填到该账号。不喜欢可以一键关掉回到旧方式（见「内嵌登录窗口与回滚」）。
 - **两种请求模式**：`原始模式` 把提示词原样发出去（不加任何额外说明），`保险模式` 在提示词最前面插一段「使用规范」并把请求放慢、压缩，更不容易被站点风控/禁言 —— 见下文「请求模式」。
 - **账号行布局更清爽**：邮箱/状态徽标占第一行，检查、重新登录、浏览器登录、复制账号密码、改密码、禁用、删除这些按钮**独占第二行**，按钮不会再把「删除」单独挤到下一行。
 - **封号/禁言后可导出账号密码手动登录**：站点风控会把插件内的登录一起拦住，这时点账号行的「复制账号密码」，会把保存的完整邮箱和密码复制到剪贴板，拿去 Chrome 里打开 chat.deepseek.com 手动登录，成功后再把 token 贴回「手动添加」即可。
-- **保存密码、失效自动重登**：可选把账号密码加密存在本机，token 过期/被踢下线时自动重新登录，不用再手动贴 token；万一被站点判定「设备风控」（`RISK_DEVICE_DETECTED`）挡住了脚本登录，点「浏览器登录」会在真实网页里自动填好账号密码登一次，token 原地换回来。
+- **登录即自动保存账号密码、下次自动填表**：内嵌窗口 / 浏览器登录成功时，插件会把登录表单里的邮箱密码**加密保存在本机**（AES-256-GCM，`state/credentials.key`，不会上传）；下次「内嵌登录」自动填好账号密码并提交，token 过期/被踢下线时也能自动重登，不用再手动贴 token；可在「运行设置」关掉这个行为。万一被站点判定「设备风控」（`RISK_DEVICE_DETECTED`）挡住了脚本登录，点「浏览器登录」会在真实网页里自动填好账号密码登一次，token 原地换回来。
 - **选模型即启动**：平时只监听一个极轻量的入口，首次调用网页版模型时才拉起引擎，空闲自动休眠。
 - **自带设置界面**：DSH 设置 →「DeepSeek 网页版」，可登录、管理账号、调参、看日志。
 - **即装即用**：包内自带 `cordis.patch.yml`，安装后由 DSH 自动应用 provider 配置。
@@ -29,7 +30,7 @@ git+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web.git
 **② 发行版压缩包（镜像，最快）**
 
 ```
-https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.43/dsh-deepseek-web-1.0.43.tgz
+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.45/dsh-deepseek-web-1.0.45.tgz
 ```
 
 **③ 仓库页（镜像浏览）**
@@ -41,7 +42,7 @@ https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web
 > 镜像不可用时，把上面链接里的 `https://gh-proxy.com/` 去掉即可直连 GitHub（官方速度可能较慢）：
 >
 > - 插件 spec：`https://github.com/irerc/dsh-deepseek-web`
-> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.43/dsh-deepseek-web-1.0.43.tgz`
+> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.45/dsh-deepseek-web-1.0.45.tgz`
 
 **不需要任何 API key**：插件自带 provider 配置与本地网关（`127.0.0.1:18081`），装好即用。
 
@@ -86,6 +87,24 @@ dsh-deepseek-web doctor
 - 401 → 若该账号保存了密码，先自动重新登录并把新 token 换到原账号（同一账号原地续跑，不打断对话）；没存密码或重登失败才标记「登录失效」。
 - 指定账号：模型名写 `deepseek-chat@工作号` 即可固定到某个账号。
 
+## 多设备与设备身份（为什么会被踢下线）
+
+站点把「设备」当成登录态的一部分：请求头 `x-device-id`、登录页的 `localStorage["deepseek-device-id:chat"]`，账号安全里还有「登录设备管理」。同一个账号如果不断以「新设备」登录（比如每次换浏览器窗口、WebView 清了存储、或者 node 引擎请求不带设备头），就很容易被判定异常登录 —— 表现就是刚登好没多久又被踢回登录页。
+
+插件现在把三处身份统一成**同一个 UUID v4**（`state/device.json`，权限 0600，首次生成后不再变）：
+
+| 位置 | 以前 | 现在 |
+|---|---|---|
+| 密码登录请求体 | `device_id` = 32 位 hex（站点不认，视为 `INVALID_DEVICE_INFO`） | 同一个 UUID v4 |
+| 内嵌/浏览器登录页 | 站点前端自己随机生成，每次可能都是新设备 | 代理在 `<head>` 里预置同一个 UUID，并给 fetch/XHR 补 `x-device-id`、`x-device-model: ""` |
+| 引擎 HTTP 请求 | 完全不带设备头 | `baseHeaders()` 统一带 `x-device-id` / `x-device-model` |
+
+另外：同一账号并发的 401 触发重登时会**合并成一次**（以前会同时发起好几次登录，站点上就多出几次会话）。
+
+**升级后第一次**：`device.json` 里的旧 hex 会被迁移成 UUID，站点可能把这次当成「新设备登录」要求一次邮箱验证码 —— 在内嵌/浏览器登录页里输一次即可，之后设备就固定下来了。如果账号安全里的设备列表很乱，去 `chat.deepseek.com` → 设置 → 账号安全 → 登录设备，把不认识/旧的设备删掉。
+
+**还想更稳的话**：手机和插件用**不同账号**（插件本来就支持多账号池），这样两边互不干扰；同一账号不要同时开着网页版和插件长时间跑。
+
 ## 请求模式（原始 / 保险）
 
 设置页「运行设置」里的 **请求模式** 决定两件事：**发给网页模型的提示词长什么样**、**请求有多急**。
@@ -114,6 +133,7 @@ dsh-deepseek-web doctor
 | sendGapMs | 1200 | 同一账号两次请求的最小间隔 |
 | maxConcurrency | 4 | 全局并发上限（账号池总和） |
 | embedLogin | true | 在设置页里内嵌登录窗口（实验）；关掉即回到「新标签页/系统浏览器打开登录页」的旧行为，也就是内嵌方案的回滚开关 |
+| saveLoginCredential | true | 登录成功时把登录表单里的邮箱+密码加密保存在本机（下次自动填表 / token 失效自动重登）；关掉则不保存 |
 | autoRelogin | true | token 失效时用保存的账号密码自动重新登录 |
 | requestMode | raw | 请求模式：`raw` 原始（提示词原样）/ `safe` 保险（插使用规范 + 更慢更保守） |
 | sectionOrder | usage,engine,accounts,addAccount,log | 设置页卡片顺序，由最下方「页面设置」的 ↑/↓ 调整 |
@@ -135,6 +155,7 @@ dsh-deepseek-web doctor
 
 - 原理：本机 18090 端口有一个登录反向代理，把 `chat.deepseek.com` 的登录页镜像成一个本机独立 origin（`127.0.0.1:18090`），设置页用 iframe 显示它；cookie 只写在本机，DSH 页面本身不接触站点 cookie。
 - 成功后：登录页里的注入脚本把 token 回传给插件（`/dsh-deepseek-web/login/token`），同时 `postMessage` 告诉设置页 —— 设置页自动关掉窗口并刷新账号列表。
+- **自动填表 / 自动保存账号密码**：登录页的注入脚本会从登录表单和站点自己的登录请求里拿到你输入的邮箱和密码，随 token 一起回传；插件把它**加密存在本机**并挂到这个账号上（「运行设置 → 登录时自动保存账号密码到本机」可关）。下次点这个账号的「内嵌登录」，账号密码会自动填好并提交；只存了完整邮箱的账号，会先自动填好邮箱，密码输一次之后也就保存下来了。
 - 账号行：有保存密码的账号会显示「内嵌登录」（自动填好账号密码）和「浏览器登录」（新标签页/系统浏览器，旧方式）两个按钮；添加账号卡片另有「用系统浏览器打开」，内嵌窗口白屏或被站点风控挡住时走这条。
 - 苹果账号：Apple 授权页禁止被任何网页内嵌，所以 **Apple 登录只能走外部窗口**，这条线路标为实验、优先级低。
 - 前置条件：浏览器和 DSH 在同一台机器上（代理只监听 `127.0.0.1`）。
@@ -176,6 +197,31 @@ bin/cli.mjs           login/accounts/start/stop/status/doctor
 MIT License
 
 ## 更新日志
+
+### v1.0.45
+
+- **修「一个账号多设备登录，容易被风控踢下线」**：根因是插件里存在**三套设备身份** —— 密码登录用 `state/device.json`（还是 32 位 hex，站点只认 UUID v4，会判 `INVALID_DEVICE_INFO`），登录页由站点前端自己随机生成 device id，而 node 引擎的 HTTP 请求**完全不带** `x-device-id`。同一个账号在站点看来就是三台设备反复登录。
+  - 新增 `server/device.mjs`：统一生成/持久化 UUID v4 设备身份（旧的 hex 一次性迁移），并额外支持重置；
+  - 引擎请求（`server/http.mjs` 的 `baseHeaders()`）统一带 `x-device-id` + `x-device-model: ""`，和站点前端一致；
+  - 登录代理在 `<head>` 里预置 `localStorage["deepseek-device-id:chat"] = 插件 UUID`，并给页面里的 `fetch` / `XMLHttpRequest` 补上 `x-device-id`，登录页从此固定是这台「设备」；
+  - 密码登录、内嵌登录、引擎请求、token 校验全部共用同一个 UUID。
+- **并发重登合并**：同一账号同时多个请求 401 时，以前会各自发起一次密码登录（站点上多出多次会话/设备）。现在 `reloginAccount` 按账号做单飞（inflight），并发调用共享同一次结果。
+- **升级提示**：设备 id 变化后站点可能要求一次邮箱验证码（当成新设备登录），在内嵌/浏览器登录页输一次即可；账号安全里的旧设备列表建议顺手清一下。
+- 新增测试 `device-test.mjs`：UUID v4 校验、旧 hex 迁移、三处身份一致、代理登录页预置与占位符替换、iframe 不被 XFO/CSP 挡。
+
+> 升级说明：`lib/client.js` 刷新设置页即可；`lib/index.js`、`server/*`（device/http/login/proxy/relogin）需要**重启 DSH** 后生效。
+
+### v1.0.44
+
+- **登录时自动保存账号密码到本机**：内嵌窗口（以及走本机代理的浏览器登录）登录成功时，插件会把登录表单里的邮箱 + 密码一起回传，并 **AES-256-GCM 加密**保存在 `state/credentials.key` 管的本地凭据里，挂到对应账号上：
+  - 注入脚本从两处拿：站点自己的登录请求体（`/api/v0/users/*` 里的 `email` / `password`），以及提交/点「登录」时从表单输入框里再抄一份（有的自定义组件不发 submit）；
+  - 新账号：`addAccount` 直接带着密码入库；
+  - 指定账号（URL 带 `__dsweb_acct`）：`replaceToken` 之后再用 `setCredential` 原地补存，不会多出重复账号；
+  - 开关：「运行设置 → 登录时自动保存账号密码到本机」（`saveLoginCredential`，默认开，也可 `DS_SAVE_LOGIN_CREDENTIAL=0` 关掉）；密码不会写进日志，`/state` 也不会返回密码（有测试守着）。
+- **内嵌登录自动填表**：存过密码的账号点「内嵌登录」会**自动填好账号密码并自动提交**；只存了完整邮箱的账号会先自动填邮箱，密码输一次后就被保存，下次全自动。密码自动填好后如果站点要邮箱验证码，仍需在这一页手动输入。
+- **提示与状态同步**：登录成功的横幅会说「账号密码已加密保存在本机」，账号行立刻出现「已存密码」徽标；之后 token 失效可以靠它自动重登，也能用「复制账号密码」导出。
+
+> 升级说明：`lib/client.js` 刷新设置页即可；`lib/index.js`、`server/inject.html`、`server/config.mjs` 需要**重启 DSH** 后生效。
 
 ### v1.0.43
 
