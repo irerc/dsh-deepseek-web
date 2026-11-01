@@ -6,6 +6,7 @@ import { currentMode, modeLimits, gapFor } from './request-mode.mjs';
 import { pickAccount, markUsed, markCooldown, markAuthExpired, markMuted, listAccounts, getToken, getCookie } from './accounts.mjs';
 import { reloginAccount } from './relogin.mjs';
 import { createStreamParser } from './stream-parser.mjs';
+import { probeToken } from './token-check.mjs';
 
 const lastSentAt = new Map(); // accountId -> timestamp
 
@@ -157,6 +158,7 @@ export class DeepSeekHttp {
     let lastError = null;
     let prefer = preferAccount;
     let reloginTried = false;
+    const transientRetried = new Set(); // 已因「复检有效」原地重试过的账号，避免原地打转
     const accountCount = Math.max(1, listAccounts().length || 1);
 
     // 多留一次机会：token 失效时可能靠「保存的密码自动重登」原地救回来，不需要换账号
@@ -177,6 +179,27 @@ export class DeepSeekHttp {
         lastError = error;
         this.lastError = error;
         if (error.kind === 'auth') {
+          const who = account.label + (account.email ? '（' + account.email + '）' : '') + ' ' + account.id;
+          // 「登录态失效」不一定是真的：WAF 拦截页（202 HTML）、限流、网络抖动同样不是 200。
+          // 复检一次 token：只有站点明确回 INVALID_TOKEN 才敢动账号状态，否则按临时故障处理，
+          // 免得把好号标成失效（用户看到「经常登录失效」，很多是这种假警报）。
+          const probe = await probeToken(token);
+          if (probe.state === 'valid') {
+            if (!transientRetried.has(account.id)) {
+              transientRetried.add(account.id);
+              this.log('[chat] 账号 ' + who + ' 报登录态失效，但 token 复检有效（' + String(error.message || '').slice(0, 60) + '）→ 按临时故障原地重试');
+              tried.delete(account.id);
+              prefer = account.id;
+              continue;
+            }
+            this.log('[chat] 账号 ' + who + ' 复检有效但仍失败，跳过本轮：' + String(error.message || '').slice(0, 80));
+            // token 明确有效就不该标成失效，也不该去撞自动重登（反而可能触发风控）
+            continue;
+          } else if (probe.state === 'unknown') {
+            // 没验出来（网络/风控页/限流）：不标记失效、也不去撞自动重登，直接换下一个账号
+            this.log('[chat] 账号 ' + who + ' token 复检没验出来（' + String(probe.message || '').slice(0, 80) + '），按临时故障换号，不标记失效');
+            continue;
+          }
           // 先试「保存的密码自动重登」：成功后原地换 token，用同一个账号再跑一次
           if (!reloginTried) {
             reloginTried = true;
@@ -190,7 +213,7 @@ export class DeepSeekHttp {
             if (r.needCode) this.log(`[chat] 账号 ${account.label} 自动重登需要邮箱验证码，请到设置里手动登录一次`);
           }
           markAuthExpired(account.id);
-          this.log(`[chat] 账号 ${account.label} 登录态失效，切换下一个`);
+          this.log(`[chat] 账号 ${who} 登录态失效，切换下一个`);
           continue;
         }
         if (error.kind === 'rate') {

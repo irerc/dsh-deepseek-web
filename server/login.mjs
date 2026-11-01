@@ -2,22 +2,20 @@
 import { post, get, classify } from './http.mjs';
 import { loadConfig } from './config.mjs';
 import { deviceId } from './accounts.mjs';
+import { probeToken } from './token-check.mjs';
 
-/** 校验一个 userToken 是否有效，返回 { ok, user?, message? } */
+/**
+ * 校验一个 userToken 是否有效，返回 { ok, invalid, user?, message? }
+ * invalid=true 表示站点明确说这个 token 死了（401 / 40002 / 40003）；
+ * 网络抖动、WAF 拦截页、限流只会让 invalid=false + ok=false，调用方不要因此改账号状态。
+ */
 export async function checkToken(token) {
-  if (!token || typeof token !== 'string' || token.length < 20) return { ok: false, message: 'token 格式不对' };
-  try {
-    const res = await get('/api/v0/users/current', { token });
-    if (res.status === 200 && res.json?.code === 0) {
-      // 这个接口的 biz_data 直接就是 user 对象（不是包在 biz_data.user 里），之前取不到邮箱就是这里错了
-      const biz = res.json?.data?.biz_data || {};
-      const user = biz.user || (biz.id || biz.email ? biz : null);
-      return { ok: true, user };
-    }
-    return { ok: false, message: res.json?.msg || 'token 已失效，请重新登录后再粘贴' };
-  } catch (error) {
-    return { ok: false, message: '校验失败：' + (error.message || error) };
-  }
+  if (!token || typeof token !== 'string' || token.length < 20) return { ok: false, invalid: true, message: 'token 格式不对' };
+  const probe = await probeToken(token);
+  if (probe.state === 'valid') return { ok: true, invalid: false, user: probe.user };
+  if (probe.state === 'invalid') return { ok: false, invalid: true, message: probe.message || 'token 已失效，请重新登录后再粘贴' };
+  // unknown：没验出来，不代表失效
+  return { ok: false, invalid: false, message: '校验失败：' + (probe.message || '未知原因') };
 }
 
 /**

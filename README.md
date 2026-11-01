@@ -7,6 +7,7 @@
 
 - **不需要浏览器**：Node 直连网页接口（PoW 用站点自带的 wasm 在本地算），因此在 Android/proot 容器里也能跑。
 - **设备身份统一（不容易被风控踢下线）**：站点用 `x-device-id`（UUID v4）+ `localStorage["deepseek-device-id:chat"]` 认设备。插件现在让「密码登录 / 内嵌登录页 / 引擎请求」共用同一个稳定的 UUID，同一个账号在站点看来始终是同一台设备；并发 401 的重登也会合并成一次，避免重复登录把自己挤掉。
+- **登录态主动体检（不再靠一次对话失败才发现掉登录）**：启动后 + 每 20 分钟用只读接口把每个账号验一遍，账号卡右上角还有「全部体检」一键手验；验到只是网络抖动 / 站点风控页（HTTP 202）/ 限流时**不会**把账号标成失效，只有站点明确回 `INVALID_TOKEN`（401 / 40002 / 40003）才算掉登录，存了密码的会当场自动重登。以前「检查」这类判定是「不是 200 就算失效」，网络抖动/风控页也会把好号标红，看起来就像「经常被登出」，其实 token 一直是好的。
 - **多账号**：轮询 + 429 冷却 + 401 自动切换，设置界面可增删；支持邮箱密码、内嵌登录窗口、系统浏览器登录、**Apple ID 登录（实验）**，被站点禁言/封号的账号会自动避让。
 - **内嵌登录窗口（实验）**：不用再切浏览器 —— 在设置页「添加账号」里点「在插件里登录（内嵌窗口）」，真实的 DeepSeek 登录页直接嵌在设置页里（同机独立端口镜像，cookie 只存在本机），登录成功后 token 自动回填、窗口自动关闭；账号行也保留「内嵌登录 / 浏览器登录」两条路，另有「用系统浏览器打开」兜底。**账号行的「打开登录页」也走本机代理**（不是 chat.deepseek.com 官网），登录成功后 token 会自动回填到该账号。不喜欢可以一键关掉回到旧方式（见「内嵌登录窗口与回滚」）。
 - **上下文仪表不再说谎**：窗口如实声明 128K，`prompt_tokens` 按本次真实请求算（不信站点那个会话累计值），长对话里既不会误报 100%+，也不会把成功回复误判成上下文溢出。
@@ -31,7 +32,7 @@ git+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web.git
 **② 发行版压缩包（镜像，最快）**
 
 ```
-https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.46/dsh-deepseek-web-1.0.46.tgz
+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.47/dsh-deepseek-web-1.0.47.tgz
 ```
 
 **③ 仓库页（镜像浏览）**
@@ -43,7 +44,7 @@ https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web
 > 镜像不可用时，把上面链接里的 `https://gh-proxy.com/` 去掉即可直连 GitHub（官方速度可能较慢）：
 >
 > - 插件 spec：`https://github.com/irerc/dsh-deepseek-web`
-> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.46/dsh-deepseek-web-1.0.46.tgz`
+> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.47/dsh-deepseek-web-1.0.47.tgz`
 
 **不需要任何 API key**：插件自带 provider 配置与本地网关（`127.0.0.1:18081`），装好即用。
 
@@ -198,6 +199,19 @@ bin/cli.mjs           login/accounts/start/stop/status/doctor
 MIT License
 
 ## 更新日志
+
+### v1.0.47
+
+**主题：把「经常登录失效」查清楚 —— 主动体检，并且只对真失效动手。**
+
+- **新增登录态主动体检**：启动后 15 秒扫一遍、之后每 20 分钟一次，逐个账号请求只读接口 `/api/v0/users/current`（不消耗对话额度）。以前只有「对话整轮失败」才会发现掉登录；现在一失效就在账号卡上显示出来，存了密码的账号当场自动重登。
+- **修「检查」按钮的误判**：账号卡的「检查」以前只要请求失败就调 `markAuthExpired` —— 网络抖动、站点 WAF 拦截页（HTTP 202 一段 HTML）、5xx 都会把好账号标成「登录失效」，用户看到的就是「又掉登录了」。现在统一走新增的 `server/token-check.mjs`（`probeToken()` → `valid` / `invalid` / `unknown`）：只有站点明确回 `INVALID_TOKEN`（401 / 40002 / 40003）才算失效，`unknown` 只记日志、不动账号状态，界面如实回一句「这次没验出来，没有改动账号状态」。
+- **对话中的 401 先复检再下结论**：引擎遇到 auth 类错误先复检 token —— 复检有效就按临时故障原地重试一次（不标失效，也不去撞自动重登触发风控）；没验出来就换号继续，同样不标失效；只有明确失效才走「自动重登 → 标记失效」。日志顺带带上账号 id + 邮箱，下次出问题能直接定位是哪个号。
+- **自动恢复被误标的账号**：体检发现某账号其实还有效、却被历史上的误判标成「登录失效」时，自动改回正常并记一条日志。
+- **账号卡新增「全部体检」**：一次验完所有账号，一句话汇总（检查几个 / 失效几个 / 恢复几个 / 重登成功几个 / 没验出来几个）。
+- 新增测试 `token-check-test.mjs`（12 项：200 / 401 / 40003 / 40002 / 202 WAF / 429 / 502 / 网络异常 / 空 token）与 `engine-auth-test.mjs`（7 项：401 但 token 有效、401 但没验出来、401 且明确失效，三条处理路径都守住）。
+
+> 升级说明：`server/token-check.mjs`、`server/login.mjs`、`server/engine-http.mjs`、`lib/index.js` 需要**重启 DSH** 后生效；`lib/client.js`（「全部体检」按钮）刷新设置页即可。自动重登依赖账号里保存的密码 —— 账号卡上没有「已存密码」标签的号，失效后仍需手动登一次。
 
 ### v1.0.46
 
