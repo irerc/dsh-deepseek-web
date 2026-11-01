@@ -76,6 +76,10 @@ export function publicAccount(a) {
     reloginBlocked: a.reloginBlocked === 'needCode' || a.reloginBlocked === 'needBrowserLogin' ? a.reloginBlocked : '',
     needBrowserLogin: a.reloginBlocked === 'needBrowserLogin',
     reloginFailures: a.reloginFailures || 0,
+    // 站点禁言（chat.is_muted / 错误码 50006）：到期前不要拿去发消息
+    mutedUntil: a.mutedUntil && a.mutedUntil > now ? a.mutedUntil : null,
+    muted: Boolean(a.mutedUntil && a.mutedUntil > now),
+    banned: Boolean(a.banned),
   };
 }
 
@@ -170,7 +174,13 @@ export function pickAccount({ prefer = null, exclude = new Set() } = {}) {
   const doc = loadAccounts();
   const now = Date.now();
   const usable = doc.accounts.filter(
-    (a) => !a.disabled && a.status !== 'authExpired' && !(a.cooldownUntil && a.cooldownUntil > now) && !exclude.has(a.id),
+    (a) =>
+      !a.disabled &&
+      !a.banned &&
+      a.status !== 'authExpired' &&
+      !(a.cooldownUntil && a.cooldownUntil > now) &&
+      !(a.mutedUntil && a.mutedUntil > now) &&
+      !exclude.has(a.id),
   );
   if (!usable.length) return null;
   if (prefer) {
@@ -202,6 +212,38 @@ export function markAuthExpired(id) {
   const account = doc.accounts.find((a) => a.id === id);
   if (!account) return null;
   account.status = 'authExpired';
+  save(doc);
+  return publicAccount(account);
+}
+
+/**
+ * 站点禁言/封禁：记下到期时间，账号池在到期前不会再拿它发消息。
+ * @param {string} id
+ * @param {number} untilMs 到期时间戳（毫秒）；0/空表示未知，按 24 小时处理
+ * @param {{banned?:boolean, reason?:string}} opts
+ */
+export function markMuted(id, untilMs = 0, { banned = false, reason = '' } = {}) {
+  const doc = loadAccounts();
+  const account = doc.accounts.find((a) => a.id === id || a.label === id);
+  if (!account) return null;
+  const until = Number(untilMs) > Date.now() ? Number(untilMs) : Date.now() + 24 * 60 * 60 * 1000;
+  account.mutedUntil = until;
+  account.muteReason = String(reason || '').slice(0, 200);
+  if (banned) {
+    account.banned = true;
+    account.disabled = true;
+  }
+  save(doc);
+  return publicAccount(account);
+}
+
+export function clearMuted(id) {
+  const doc = loadAccounts();
+  const account = doc.accounts.find((a) => a.id === id || a.label === id);
+  if (!account) return null;
+  delete account.mutedUntil;
+  delete account.muteReason;
+  delete account.banned;
   save(doc);
   return publicAccount(account);
 }
@@ -276,6 +318,9 @@ export function replaceToken(id, token, user = {}) {
   account.lastReloginAt = Date.now();
   account.reloginFailures = 0;
   account.reloginBlocked = '';
+  delete account.mutedUntil;
+  delete account.muteReason;
+  delete account.banned;
   if (user?.email) {
     if (!isMaskedEmail(user.email)) account.emailFull = user.email;
     else if (!fullEmailOf(account)) account.email = user.email;

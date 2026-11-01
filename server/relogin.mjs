@@ -18,11 +18,13 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /** 上游的「设备风控 / 不要用脚本登」类错误 */
 function isRiskError(message) {
-  return /RISK_DEVICE_DETECTED|DEVICE_DETECTED|_RISK_|风控/i.test(String(message || ''));
+  const m = String(message || '');
+  // RISK_*：设备风控；WAF/202/403：站点前置拦截；40029：按 IP 限流。这几种脚本登录都走不通。
+  return /RISK_DEVICE_DETECTED|DEVICE_DETECTED|_RISK_|风控|WAF|HTTP 202|HTTP 403/i.test(m);
 }
 /** 限流：歇一会儿再试，别当风控处理 */
 function isRateError(message) {
-  return /TOO_MANY_REQUESTS|429|被限流/i.test(String(message || ''));
+  return /TOO_MANY_REQUESTS|429|40029|被限流|IP 限流/i.test(String(message || ''));
 }
 
 /**

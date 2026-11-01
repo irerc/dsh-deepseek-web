@@ -6,7 +6,7 @@
 把 **chat.deepseek.com 网页版** 包成 OpenAI 兼容接口的 DeepSeek Harness 插件。如果它帮你省下了 API 费用，欢迎点个 **Star** ⭐
 
 - **不需要浏览器**：Node 直连网页接口（PoW 用站点自带的 wasm 在本地算），因此在 Android/proot 容器里也能跑。
-- **多账号**：轮询 + 429 冷却 + 401 自动切换，设置界面可增删。
+- **多账号**：轮询 + 429 冷却 + 401 自动切换，设置界面可增删；支持邮箱密码、浏览器登录、**Apple ID 登录**，被站点禁言/封号的账号会自动避让。
 - **保存密码、失效自动重登**：可选把账号密码加密存在本机，token 过期/被踢下线时自动重新登录，不用再手动贴 token；万一被站点判定「设备风控」（`RISK_DEVICE_DETECTED`）挡住了脚本登录，点「浏览器登录」会在真实网页里自动填好账号密码登一次，token 原地换回来。
 - **选模型即启动**：平时只监听一个极轻量的入口，首次调用网页版模型时才拉起引擎，空闲自动休眠。
 - **自带设置界面**：DSH 设置 →「DeepSeek 网页版」，可登录、管理账号、调参、看日志。
@@ -25,7 +25,7 @@ git+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web.git
 **② 发行版压缩包（镜像，最快）**
 
 ```
-https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.37/dsh-deepseek-web-1.0.37.tgz
+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.38/dsh-deepseek-web-1.0.38.tgz
 ```
 
 **③ 仓库页（镜像浏览）**
@@ -37,7 +37,7 @@ https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web
 > 镜像不可用时，把上面链接里的 `https://gh-proxy.com/` 去掉即可直连 GitHub（官方速度可能较慢）：
 >
 > - 插件 spec：`https://github.com/irerc/dsh-deepseek-web`
-> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.37/dsh-deepseek-web-1.0.37.tgz`
+> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.38/dsh-deepseek-web-1.0.38.tgz`
 
 **不需要任何 API key**：插件自带 provider 配置与本地网关（`127.0.0.1:18081`），装好即用。
 
@@ -133,6 +133,17 @@ bin/cli.mjs           login/accounts/start/stop/status/doctor
 MIT License
 
 ## 更新日志
+
+### v1.0.38
+
+- **新增「Apple 账号登录」**：添加账号卡片里多了一个「Apple 账号登录」按钮，点开是本机的一个授权页，用 Apple ID 授权后直接把 id_token 换成 DeepSeek 登录态并入库（和站点自己的 `/oauth/apple/login` 同一条路），不用再去站点登录页里找按钮。
+  - 新 Apple 账号被站点要求「绑定手机号」时，会明确提示去浏览器登录页完成绑定（这一步只能人工做），不会把失败伪装成成功。
+  - Apple 返回风控 `RISK_DEVICE_DETECTED`、封号、凭证失效等错误都分别翻译成了人话。
+- **禁言 / 封号识别**：站点现在会 `禁言`（错误码 50006，返回 `end_at`）或 `封号`（40012）来处置违规账号。插件会：
+  - 从 `users/current` 的 `chat.is_muted` / `mute_until` 和对话流里的 50006 认出来，记下到期时间；
+  - 到期前**账号池不会再用它发消息**，自动切到别的号，不再一调用就报错；
+  - 账号行显示「禁言中」徽标和「禁言至 2026/11/4 08:27」的说明，封号显示「已封禁」；点「检查」会如实返回禁言状态。
+- **密码登录被站点前置风控拦住时不再误报**：`users/login` 现在经常直接回 HTTP 202（WAF 挑战）或 403（Request Blocked），以前会被显示成「未知原因（{}）」。现在识别成「站点前置风控拦截」，按风控处理（6 小时冷却 + 提示改用浏览器登录），并在登录请求被 40029（按 IP 限流）拦时按限流处理，不再反复空撞。
 
 ### v1.0.37
 

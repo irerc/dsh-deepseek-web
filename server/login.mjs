@@ -81,6 +81,14 @@ export async function loginWithPassword(email, password, opts = {}) {
     if (code === 0 && biz?.user?.token) {
       return { ok: true, token: biz.user.token, user: biz.user };
     }
+    // 站点前置的 WAF：不返回 JSON，直接 202 challenge（或 403 Request Blocked / 40029 限 IP）。
+    // 这条路脚本走不通，只能让真实浏览器去登，别当成「密码错」。
+    if (!res.json || res.status === 202 || res.status === 403) {
+      return { ok: false, waf: true, message: '站点前置风控拦截（HTTP ' + res.status + '），密码登录这条路走不通，请用「浏览器登录」' };
+    }
+    if (res.json?.code === 40029) {
+      return { ok: false, waf: true, message: '站点按 IP 限流（40029），过一会儿或用「浏览器登录」' };
+    }
     if (code === 14 || /MFA/i.test(msg)) {
       return {
         ok: false,
@@ -151,4 +159,43 @@ export async function fetchGuestChallenge() {
   );
   if (res.json?.data?.biz_code === 0) return res.json.data.biz_data.guest_challenge;
   throw classify(res, '获取游客挑战');
+}
+
+/**
+ * 用 Apple 登录拿到的 id_token 换取 DeepSeek 登录态（对应站点 /oauth/apple/login）。
+ * 站点前端是：AppleID.auth.signIn() → id_token → 这里换 token。
+ */
+export async function loginWithAppleIdToken(idToken) {
+  if (!idToken || String(idToken).length < 20) return { ok: false, message: 'Apple 没有返回有效凭证' };
+  const APPLE_CODE = {
+    1: { needBindMobile: true, message: '这个 Apple 账号还没绑定手机号：站点要求先绑一个手机号，请在浏览器登录页用 Apple 登录并按提示绑定一次' },
+    2: { message: 'Apple 凭证校验失败（TOKEN_VERIFY_FAILED），请重新登录 Apple' },
+    3: { banned: true, message: '这个账号已被站点封禁（ACCOUNT_BANNED）' },
+    8: { message: '该邮箱已经绑定过另一个 Apple 账号' },
+    9: { message: '这个 Apple 账号已经绑定了别的邮箱' },
+    10: { banned: true, message: '这个账号已被站点停用（USER_IS_BANNED）' },
+    11: { risk: true, message: '站点判定本机设备存在风控（RISK_DEVICE_DETECTED），请改用「浏览器登录」' },
+  };
+  try {
+    const res = await post('/api/v0/users/oauth/apple/login', {
+      device_id: deviceId(),
+      id_token: String(idToken),
+      os: 'web',
+      sms_verification_code: '',
+      area_code: '',
+      mobile_number: '',
+    });
+    const biz = res.json?.data?.biz_data || {};
+    const code = res.json?.data?.biz_code;
+    const msg = res.json?.data?.biz_msg || res.json?.msg || '';
+    if (code === 0 && biz?.user?.token) return { ok: true, token: biz.user.token, user: biz.user };
+    if (!res.json || res.status === 202 || res.status === 403) {
+      return { ok: false, waf: true, message: '站点前置风控拦截（HTTP ' + res.status + '），请用「浏览器登录」' };
+    }
+    const mapped = APPLE_CODE[code];
+    if (mapped) return { ok: false, code, ...mapped };
+    return { ok: false, code, message: 'Apple 登录失败：' + (msg || '未知原因（' + String(res.status) + '）') };
+  } catch (error) {
+    return { ok: false, message: 'Apple 登录失败：' + (error.message || error) };
+  }
 }

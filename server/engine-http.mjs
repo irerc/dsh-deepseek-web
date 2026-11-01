@@ -2,7 +2,7 @@
 import { BASE, UA, post, get, classify, UpstreamError, baseHeaders } from './http.mjs';
 import { solvePowHeader } from './pow.mjs';
 import { loadConfig } from './config.mjs';
-import { pickAccount, markUsed, markCooldown, markAuthExpired, listAccounts, getToken, getCookie } from './accounts.mjs';
+import { pickAccount, markUsed, markCooldown, markAuthExpired, markMuted, listAccounts, getToken, getCookie } from './accounts.mjs';
 import { reloginAccount } from './relogin.mjs';
 import { createStreamParser } from './stream-parser.mjs';
 
@@ -10,6 +10,19 @@ const lastSentAt = new Map(); // accountId -> timestamp
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+/** 从上游返回块里认出「禁言 / 封号」：50006 MUTED、40012 USER_IS_BANNED（站点错误码） */
+export function muteErrorFrom(text) {
+  if (!/"code"\s*:\s*50006|"biz_code"\s*:\s*50006/.test(text) && !/"code"\s*:\s*40012|"biz_code"\s*:\s*40012/.test(text)) return null;
+  const banned = /"code"\s*:\s*40012|"biz_code"\s*:\s*40012/.test(text);
+  const m = /"end_at"\s*:\s*(\d{9,13})/.exec(text) || /"mute_until"\s*:\s*(\d{9,13})/.exec(text);
+  let untilMs = 0;
+  if (m) {
+    const n = Number(m[1]);
+    untilMs = n > 1e12 ? n : n * 1000;
+  }
+  return { banned, untilMs };
 }
 
 export class DeepSeekHttp {
@@ -181,6 +194,14 @@ export class DeepSeekHttp {
           this.log(`[chat] 账号 ${account.label} 被限流，冷却 ${Math.round((out?.wait || 0) / 1000)}s`);
           continue;
         }
+        if (error.kind === 'mute' || error.kind === 'banned') {
+          // 站点禁言/封号：账号本身还登着，但不能发消息。记下来，到期前不再用它，换下一个账号。
+          const until = error.untilMs || 0;
+          markMuted(account.id, until, { banned: error.kind === 'banned', reason: error.message });
+          const when = until ? new Date(until).toLocaleString('zh-CN') : '（站点未给到期时间）';
+          this.log(`[chat] 账号 ${account.label} ${error.kind === 'banned' ? '已被停用' : '被禁言'}：${when}，切换下一个`);
+          continue;
+        }
         // 其它错误：交给网关的上层重试策略（空回复重试、换会话重试）
         throw error;
       }
@@ -238,6 +259,14 @@ export class DeepSeekHttp {
         while ((idx = buf.indexOf('\n\n')) >= 0) {
           const block = buf.slice(0, idx);
           buf = buf.slice(idx + 2);
+          const muted = muteErrorFrom(block);
+          if (muted) {
+            throw new UpstreamError(muted.banned ? '账号已被站点停用' : '账号被站点禁言', {
+              kind: muted.banned ? 'banned' : 'mute',
+              code: muted.banned ? '40012' : '50006',
+              untilMs: muted.untilMs,
+            });
+          }
           if (block.trim() && onDelta) onDelta(block);
         }
       }
