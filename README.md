@@ -8,6 +8,8 @@
 - **不需要浏览器**：Node 直连网页接口（PoW 用站点自带的 wasm 在本地算），因此在 Android/proot 容器里也能跑。
 - **多账号**：轮询 + 429 冷却 + 401 自动切换，设置界面可增删；支持邮箱密码、浏览器登录、**Apple ID 登录**，被站点禁言/封号的账号会自动避让。
 - **两种请求模式**：`原始模式` 把提示词原样发出去（不加任何额外说明），`保险模式` 在提示词最前面插一段「使用规范」并把请求放慢、压缩，更不容易被站点风控/禁言 —— 见下文「请求模式」。
+- **账号行布局更清爽**：邮箱/状态徽标占第一行，检查、重新登录、浏览器登录、复制账号密码、改密码、禁用、删除这些按钮**独占第二行**，按钮不会再把「删除」单独挤到下一行。
+- **封号/禁言后可导出账号密码手动登录**：站点风控会把插件内的登录一起拦住，这时点账号行的「复制账号密码」，会把保存的完整邮箱和密码复制到剪贴板，拿去 Chrome 里打开 chat.deepseek.com 手动登录，成功后再把 token 贴回「手动添加」即可。
 - **保存密码、失效自动重登**：可选把账号密码加密存在本机，token 过期/被踢下线时自动重新登录，不用再手动贴 token；万一被站点判定「设备风控」（`RISK_DEVICE_DETECTED`）挡住了脚本登录，点「浏览器登录」会在真实网页里自动填好账号密码登一次，token 原地换回来。
 - **选模型即启动**：平时只监听一个极轻量的入口，首次调用网页版模型时才拉起引擎，空闲自动休眠。
 - **自带设置界面**：DSH 设置 →「DeepSeek 网页版」，可登录、管理账号、调参、看日志。
@@ -26,7 +28,7 @@ git+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web.git
 **② 发行版压缩包（镜像，最快）**
 
 ```
-https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.39/dsh-deepseek-web-1.0.39.tgz
+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.41/dsh-deepseek-web-1.0.41.tgz
 ```
 
 **③ 仓库页（镜像浏览）**
@@ -38,7 +40,7 @@ https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web
 > 镜像不可用时，把上面链接里的 `https://gh-proxy.com/` 去掉即可直连 GitHub（官方速度可能较慢）：
 >
 > - 插件 spec：`https://github.com/irerc/dsh-deepseek-web`
-> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.39/dsh-deepseek-web-1.0.39.tgz`
+> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.41/dsh-deepseek-web-1.0.41.tgz`
 
 **不需要任何 API key**：插件自带 provider 配置与本地网关（`127.0.0.1:18081`），装好即用。
 
@@ -154,6 +156,27 @@ bin/cli.mjs           login/accounts/start/stop/status/doctor
 MIT License
 
 ## 更新日志
+
+### v1.0.41
+
+- **修「各对话详情」全叫同一个名字**：对话标签以前直接取第一条 `user` 消息，而 DSH 的自动续跑/检查会把每个会话的第一条消息都写成同一句「This is an automatically generated check」，于是 5 个对话看起来一模一样。
+  - 现在优先取「第一条真正有内容的用户消息」当标题（跳过自动检查/续跑这类套话，至少 6 个字符）；
+  - 老记录没法回溯，显示时把这类套话统一显示成「自动检查 / 续跑会话」；
+  - 每行补上网页会话 id 和更新时间（`#8d3af0b6 · 11/01 10:42`），一眼能分清是哪一条；
+  - 加了一行说明：按网页会话统计，同一会话续聊会累计到一起，所以「轮次」比对话条数多。
+
+### v1.0.40
+
+- **账号行布局重做**：以前邮箱、徽标、6~7 个按钮全挤在一个 flex 行里，窄一点就把「删除」单独挤到第二行，看着很别扭。现在拆成三层：
+  - 第一行：完整邮箱 + 「已存密码」/「正常」/「禁言中」等徽标；
+  - 第二行：状态说明（禁言至…、登录失效、风控提示等）单独占一行；
+  - 第三行：操作按钮统一 `6px 10px` 紧凑样式、文字强制不换行，按钮行整体可折行 —— 现在 8 个按钮也排得下，不会再出现孤零零的「删除」。
+- **新增「复制账号密码」**：实测站点风控会把插件内的登录一起拦掉（连真实网页自动填表都可能过不去）。现在账号行直接提供「复制账号密码」，把保存的完整邮箱和密码写进剪贴板：
+  - 复制内容就是 `账号：xxx@qq.com` + `密码：xxx` 两行，手机剪贴板可直接粘进 Chrome；
+  - 另配「打开登录页」按钮，一键打开 `chat.deepseek.com/sign_in`；
+  - 登录成功后在「手动添加」里贴 token 回填即可（或直接把 token 贴回同一个账号）；
+  - 没存密码的账号不会显示这个按钮，先点「存密码」。
+- 禁言/封号账号的提示文案也补上了「点复制账号密码去 Chrome 手动登录」，不再只让你干等或删号。
 
 ### v1.0.39
 

@@ -7,6 +7,7 @@ import { DeepSeekHttp } from './engine-http.mjs';
 import { createStreamParser } from './stream-parser.mjs';
 import { loadConfig, STATE_DIR } from './config.mjs';
 import { currentMode, modeLimits, guardMessage, contractFor, GUARD_MARK } from './request-mode.mjs';
+import { convLabelOf } from './conv-label.mjs';
 import * as accountStore from './accounts.mjs';
 
 const USAGE_FILE = path.join(STATE_DIR, 'usage.json');
@@ -924,11 +925,8 @@ async function handleChat(req, res) {
       ' completion=' + completionTokens + ' cached=' + cachedTokens +
       ' hit=' + (promptTokens ? Math.round((cachedTokens / promptTokens) * 1000) / 10 : 0) + '%',
   );
-  const convLabel = (() => {
-    const first = messages.find((m) => m && m.role === 'user');
-    const text = first ? String(typeof first.content === 'string' ? first.content : contentToText(first.content)) : '';
-    return text.replace(/\s+/g, ' ').trim().slice(0, 40);
-  })();
+  // 对话标签：交给 conv-label.mjs（跳过「自动检查/续跑」套话，取第一条有内容的用户消息）
+  const convLabel = convLabelOf(messages, contentToText);
   try { addUsage(convKey.slice(0, 12), promptTokens, completionTokens, cachedTokens, convLabel); } catch {}
   // 去重：模型有时会同时吐 DSML 和 @@TOOL@@ 两种格式，会得到完全相同的两个调用
   const seenCalls = new Set();
