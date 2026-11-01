@@ -13,6 +13,18 @@
   var TOKEN_RE = /^[A-Za-z0-9+/=_-]{30,300}$/;
   var loginEmail = ''; // 用户在登录表单里填的完整邮箱（站点接口只回脱敏地址，这个更准）
 
+  // 内嵌模式：设置页把登录页放在 iframe 里（独立端口 = 独立 origin）。登录成功要通知父页面
+  // 关闭窗口并刷新账号列表——父子不同源，只能靠 postMessage，父页面会校验 origin。
+  var IN_FRAME = (function () { try { return window.top !== window.self; } catch (e) { return true; } })();
+  function notifyParent(kind, extra) {
+    if (!IN_FRAME) return;
+    try {
+      var msg = { type: 'dsweb:' + kind, at: Date.now() };
+      if (extra) { for (var k in extra) { if (Object.prototype.hasOwnProperty.call(extra, k)) msg[k] = extra[k]; } }
+      window.parent.postMessage(msg, '*');
+    } catch (e) {}
+  }
+
   function looksToken(v) {
     return typeof v === 'string' && TOKEN_RE.test(v) && v.length >= 30;
   }
@@ -49,6 +61,12 @@
     }).then(function (r) { return r.json(); }).then(function (d) {
       if (d && d.ok) {
         tip('已保存到 DSH 插件 ✓（来源 ' + source + '），可以关闭本页了');
+        // 内嵌窗口里：告诉设置页「登录成功」，它会自动关闭 iframe 并刷新账号列表
+        notifyParent('login-ok', {
+          accountId: (d.account && d.account.id) || window.__dswebAccountId || '',
+          email: loginEmail || domEmail(),
+          source: source
+        });
         var btn = document.getElementById('__dsweb_scan');
         if (btn) { btn.textContent = '已保存 ✓'; btn.disabled = true; }
         setTimeout(function () { if (location.pathname !== '/') location.href = '/'; }, 1200);
@@ -351,6 +369,24 @@
   window.addEventListener('unhandledrejection', function (e) {
     tip('Promise 失败: ' + (e.reason && (e.reason.message || e.reason)));
   });
+
+  /* ---------- 内嵌模式：别让登录页跳出 iframe ---------- */
+  // 站点有些链接是 target=_blank（注册 / 找回密码 / 第三方授权），在 iframe 里点了会被拦，
+  // 直接改成当前窗口跳转，用户不至于卡住。
+  if (IN_FRAME) {
+    document.addEventListener('click', function (e) {
+      var el = e.target;
+      while (el && el !== document) {
+        if (el.tagName === 'A' && (el.target === '_blank' || el.target === '_new')) { el.target = '_self'; break; }
+        el = el.parentNode;
+      }
+    }, true);
+    var __dswebOpen = window.open;
+    window.open = function (url) {
+      try { if (url && typeof url === 'string') { location.href = url; return null; } } catch (e) {}
+      return __dswebOpen.apply(window, arguments);
+    };
+  }
 
   setInterval(status, 1500);
   setInterval(tagLoginForm, 1500);

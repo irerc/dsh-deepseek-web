@@ -6,7 +6,8 @@
 把 **chat.deepseek.com 网页版** 包成 OpenAI 兼容接口的 DeepSeek Harness 插件。如果它帮你省下了 API 费用，欢迎点个 **Star** ⭐
 
 - **不需要浏览器**：Node 直连网页接口（PoW 用站点自带的 wasm 在本地算），因此在 Android/proot 容器里也能跑。
-- **多账号**：轮询 + 429 冷却 + 401 自动切换，设置界面可增删；支持邮箱密码、浏览器登录、**Apple ID 登录**，被站点禁言/封号的账号会自动避让。
+- **多账号**：轮询 + 429 冷却 + 401 自动切换，设置界面可增删；支持邮箱密码、内嵌登录窗口、系统浏览器登录、**Apple ID 登录（实验）**，被站点禁言/封号的账号会自动避让。
+- **内嵌登录窗口（实验）**：不用再切浏览器 —— 在设置页「添加账号」里点「在插件里登录（内嵌窗口）」，真实的 DeepSeek 登录页直接嵌在设置页里（同机独立端口镜像，cookie 只存在本机），登录成功后 token 自动回填、窗口自动关闭；账号行也保留「内嵌登录 / 浏览器登录」两条路，另有「用系统浏览器打开」兜底。不喜欢可以一键关掉回到旧方式（见「内嵌登录窗口与回滚」）。
 - **两种请求模式**：`原始模式` 把提示词原样发出去（不加任何额外说明），`保险模式` 在提示词最前面插一段「使用规范」并把请求放慢、压缩，更不容易被站点风控/禁言 —— 见下文「请求模式」。
 - **账号行布局更清爽**：邮箱/状态徽标占第一行，检查、重新登录、浏览器登录、复制账号密码、改密码、禁用、删除这些按钮**独占第二行**，按钮不会再把「删除」单独挤到下一行。
 - **封号/禁言后可导出账号密码手动登录**：站点风控会把插件内的登录一起拦住，这时点账号行的「复制账号密码」，会把保存的完整邮箱和密码复制到剪贴板，拿去 Chrome 里打开 chat.deepseek.com 手动登录，成功后再把 token 贴回「手动添加」即可。
@@ -28,7 +29,7 @@ git+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web.git
 **② 发行版压缩包（镜像，最快）**
 
 ```
-https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.41/dsh-deepseek-web-1.0.41.tgz
+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.42/dsh-deepseek-web-1.0.42.tgz
 ```
 
 **③ 仓库页（镜像浏览）**
@@ -40,7 +41,7 @@ https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web
 > 镜像不可用时，把上面链接里的 `https://gh-proxy.com/` 去掉即可直连 GitHub（官方速度可能较慢）：
 >
 > - 插件 spec：`https://github.com/irerc/dsh-deepseek-web`
-> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.41/dsh-deepseek-web-1.0.41.tgz`
+> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.42/dsh-deepseek-web-1.0.42.tgz`
 
 **不需要任何 API key**：插件自带 provider 配置与本地网关（`127.0.0.1:18081`），装好即用。
 
@@ -112,6 +113,7 @@ dsh-deepseek-web doctor
 | idleStopMs | 600000 | 空闲多少毫秒后关停引擎 |
 | sendGapMs | 1200 | 同一账号两次请求的最小间隔 |
 | maxConcurrency | 4 | 全局并发上限（账号池总和） |
+| embedLogin | true | 在设置页里内嵌登录窗口（实验）；关掉即回到「新标签页/系统浏览器打开登录页」的旧行为，也就是内嵌方案的回滚开关 |
 | autoRelogin | true | token 失效时用保存的账号密码自动重新登录 |
 | requestMode | raw | 请求模式：`raw` 原始（提示词原样）/ `safe` 保险（插使用规范 + 更慢更保守） |
 | sectionOrder | usage,engine,accounts,addAccount,log | 设置页卡片顺序，由最下方「页面设置」的 ↑/↓ 调整 |
@@ -126,6 +128,24 @@ dsh-deepseek-web doctor
 - **清空 Token 用量记录**：删除 `state/usage.json`，插件内累计用量归零（不影响账号、会话、登录状态）。
 - **重置所有插件设置**：把 config 恢复默认值（自动启动、空闲休眠、发送间隔、并发、卡片顺序），会先弹出确认窗口再执行；窗口里可选勾选「同时删除已登录账号和 token（不可恢复）」，不勾选则保留账号。
   - 确认窗口内还有二级页「删除所有账号和数据」：彻底清空账号/token/cookie、用量统计、cookie 罐与全部设置（`POST /factory-reset`），需再点一次「确认彻底删除」。
+
+## 内嵌登录窗口（实验）与回滚
+
+站点风控会拦掉「插件内直接把账号密码 POST 给站点」的登录，但**真实网页里的登录能过**。内嵌窗口就是把真实登录页搬进设置页，省掉切浏览器这一步：
+
+- 原理：本机 18090 端口有一个登录反向代理，把 `chat.deepseek.com` 的登录页镜像成一个本机独立 origin（`127.0.0.1:18090`），设置页用 iframe 显示它；cookie 只写在本机，DSH 页面本身不接触站点 cookie。
+- 成功后：登录页里的注入脚本把 token 回传给插件（`/dsh-deepseek-web/login/token`），同时 `postMessage` 告诉设置页 —— 设置页自动关掉窗口并刷新账号列表。
+- 账号行：有保存密码的账号会显示「内嵌登录」（自动填好账号密码）和「浏览器登录」（新标签页/系统浏览器，旧方式）两个按钮；添加账号卡片另有「用系统浏览器打开」，内嵌窗口白屏或被站点风控挡住时走这条。
+- 苹果账号：Apple 授权页禁止被任何网页内嵌，所以 **Apple 登录只能走外部窗口**，这条线路标为实验、优先级低。
+- 前置条件：浏览器和 DSH 在同一台机器上（代理只监听 `127.0.0.1`）。
+
+**回滚**（三选一，都不用重装旧包）：
+
+1. 设置页「运行设置」→ 取消勾选「在设置页里内嵌登录窗口（实验）」→ 立即回到 v1.0.41 的行为（登录页走新标签页/系统浏览器），iframe 不再出现；
+2. 环境变量 `DS_EMBED_LOGIN=0` 启动 DSH，效果同上（配置文件里的开关也会被写成关）；
+3. 代码级回滚：`git revert` 本版本提交，或直接重装 v1.0.41 的压缩包（账号数据在 `~/.dsh/storages/dsh-deepseek-web`，不受影响）。
+
+系统浏览器线路（`POST /dsh-deepseek-web/login/browser` → 宿主 `openOnDevice`）**完整保留**，内嵌开关关不关都能用。
 
 ## 目录
 
@@ -156,6 +176,19 @@ bin/cli.mjs           login/accounts/start/stop/status/doctor
 MIT License
 
 ## 更新日志
+
+### v1.0.42
+
+- **新增内嵌登录窗口（实验）**：设置页「添加账号」现在可以把真实登录页直接嵌在页内，不用再切浏览器 / 等系统浏览器弹出来。
+  - 新增宿主路由 `POST /login/embed`：复用同一个本机登录代理（18090），把 `/sign_in` 地址交给设置页；带 `accountId` 时顺带签发一次性票据，账号密码自动填好。这条路由**不调用** `openOnDevice`，不会弹系统浏览器。
+  - 设置页里是一个 iframe（登录页跑在独立 origin，cookie 只在本机），带「重新加载 / 用系统浏览器打开 / 关闭」；登录页里的脚本登录成功后 `postMessage` 通知设置页，设置页自动关闭窗口并刷新账号列表。
+  - 账号行有保存密码时同时给「内嵌登录」（自动填表）和「浏览器登录」（新标签页，旧方式）两个按钮，互不影响。
+  - 注入脚本在 iframe 里会把 `target=_blank` 链接改成当前窗口跳转、`window.open` 兜底，避免点了链接被浏览器拦掉卡在中间页。
+- **系统浏览器线路完整保留**：`/login/browser` + `openOnDevice` 原样不动，内嵌窗口旁边就有「用系统浏览器打开」；内嵌白屏、被站点风控挡住或需要走 Apple 授权时都能退回旧路。
+- **回滚开关**：设置页「运行设置」新增「在设置页里内嵌登录窗口（实验）」，取消勾选立即回到 v1.0.41 的行为（登录页走新标签页/系统浏览器）；也支持环境变量 `DS_EMBED_LOGIN=0`。配置项 `embedLogin` 默认 `true`。
+- **Apple 登录标为实验性**：Apple 授权页禁止被内嵌（`frame-ancestors 'none'` + 顶层窗口校验），所以 Apple 只能走外部窗口。按钮改为「Apple 账号登录（实验）」，`/apple` 页面也加了「实验性 · 优先级低」标记，说明这条线路不是主路径。
+- **旧版本后台兼容**：宿主还是旧版（没有 `/login/embed`）时点内嵌登录会明确提示「重启 DSH 后再试」，不会偷偷改成弹窗口。
+- 本轮改动：`lib/client.js` 是客户端热更（刷新设置页即可）；`lib/index.js`、`server/config.mjs`、`server/inject.html` 需要**重启 DSH** 后才生效。
 
 ### v1.0.41
 

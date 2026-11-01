@@ -27,6 +27,9 @@ export const DEFAULTS = {
   // 登录线路：auto 跟随浏览器；cn 国内（中文登录页，手机号/微信/邮箱都可）；global 英文登录页（邮箱/Google 账号用，大陆网络同样可用）
   loginRegion: 'auto',
   loginHost: '', // 可选：登录页上游域名（默认 chat.deepseek.com，海外可填镜像域名）
+  // 设置页里内嵌登录窗口（实验性）：关掉就回到「新标签页打开登录页」的旧行为。
+  // 这是内嵌方案的回滚开关，改完立即生效，不需要降级插件版本。
+  embedLogin: process.env.DS_EMBED_LOGIN !== '0',
   defaultAccount: null, // 不指定时按账号池轮询
   port: Number(process.env.DEEPSEEK_BRIDGE_PORT || 18081),
   // 设置页卡片显示顺序（由设置页最下方的「页面设置」修改）
@@ -110,6 +113,7 @@ export function saveConfig(patch) {
   clean.autoRelogin = clean.autoRelogin !== false;
   clean.loginRegion = ['auto', 'cn', 'global'].includes(clean.loginRegion) ? clean.loginRegion : 'auto';
   clean.loginHost = String(clean.loginHost || '').trim().slice(0, 120);
+  clean.embedLogin = clean.embedLogin !== false;
   clean.sectionOrder = normalizeSectionOrder(clean.sectionOrder);
   fs.writeFileSync(CONFIG_FILE, JSON.stringify(clean, null, 2), { mode: 0o600 });
   return clean;
