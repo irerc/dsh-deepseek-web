@@ -2,6 +2,7 @@
 import { BASE, UA, post, get, classify, UpstreamError, baseHeaders } from './http.mjs';
 import { solvePowHeader } from './pow.mjs';
 import { loadConfig } from './config.mjs';
+import { currentMode, modeLimits, gapFor } from './request-mode.mjs';
 import { pickAccount, markUsed, markCooldown, markAuthExpired, markMuted, listAccounts, getToken, getCookie } from './accounts.mjs';
 import { reloginAccount } from './relogin.mjs';
 import { createStreamParser } from './stream-parser.mjs';
@@ -58,8 +59,10 @@ export class DeepSeekHttp {
    */
   async _runChat(accountId, fn) {
     const cfg = loadConfig();
+    const lim = modeLimits(currentMode());
     const totalLimit = Math.max(1, Number(cfg.maxConcurrency) || 4);
-    const perAccount = Math.max(1, Number(cfg.perAccountConcurrency) || 1);
+    // 保险模式：同账号严格串行（并发 1），避免短时间内多次打同一账号
+    const perAccount = Math.max(1, lim.perAccountConcurrency || Number(cfg.perAccountConcurrency) || 1);
     for (;;) {
       const cur = this._accActive.get(accountId) || 0;
       if (cur < perAccount && this._active < totalLimit) {
@@ -119,7 +122,8 @@ export class DeepSeekHttp {
   /** 等一个账号的发送间隔，保证不紧贴着打上游 */
   async pace(accountId) {
     const { sendGapMs } = loadConfig();
-    const gap = Math.max(0, sendGapMs) * (0.8 + Math.random() * 0.4);
+    // 保险模式至少间隔 4 秒、抖动更长；原始模式按配置走
+    const gap = gapFor(sendGapMs, currentMode());
     const last = lastSentAt.get(accountId) || 0;
     const wait = last + gap - Date.now();
     if (wait > 0) await sleep(wait);

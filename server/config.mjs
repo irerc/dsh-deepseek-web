@@ -17,6 +17,8 @@ export const DEFAULTS = {
   autoStart: true, // 首次调用时自动拉起引擎
   idleStopMs: 10 * 60 * 1000, // 空闲多久关停引擎
   sendGapMs: 1200, // 同一账号两次请求的最小间隔
+  // 请求模式：raw 原始（提示词原样、不加额外说明）| safe 保险（提示词里插使用规范 + 更慢更保守）
+  requestMode: 'raw',
   maxConcurrency: 4, // 全局并发上限
   perAccountConcurrency: 2,
   showToolNarration: false, // 调工具的轮次是否显示模型前面的说明文字（大号白字那种「我先看看 XX」）
@@ -78,6 +80,7 @@ export function loadConfig() {
   cfg.sectionOrder = normalizeSectionOrder(cfg.sectionOrder);
   if (process.env.DS_SEND_GAP_MS) cfg.sendGapMs = Number(process.env.DS_SEND_GAP_MS);
   if (process.env.DS_MAX_CONCURRENCY) cfg.maxConcurrency = Number(process.env.DS_MAX_CONCURRENCY);
+  if (process.env.DS_REQUEST_MODE) cfg.requestMode = String(process.env.DS_REQUEST_MODE);
   return cfg;
 }
 
@@ -99,6 +102,7 @@ export function saveConfig(patch) {
     if (next[key] !== undefined) clean[key] = next[key];
   }
   clean.sendGapMs = Math.max(0, Math.min(60000, Number(clean.sendGapMs) || 0));
+  clean.requestMode = ['raw', 'safe'].includes(clean.requestMode) ? clean.requestMode : 'raw';
   clean.idleStopMs = Math.max(60000, Math.min(24 * 3600 * 1000, Number(clean.idleStopMs) || DEFAULTS.idleStopMs));
   clean.maxConcurrency = Math.max(1, Math.min(16, Number(clean.maxConcurrency) || DEFAULTS.maxConcurrency));
   clean.autoStart = clean.autoStart !== false;

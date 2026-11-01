@@ -6,6 +6,7 @@ import path from 'node:path';
 import { DeepSeekHttp } from './engine-http.mjs';
 import { createStreamParser } from './stream-parser.mjs';
 import { loadConfig, STATE_DIR } from './config.mjs';
+import { currentMode, modeLimits, guardMessage, contractFor, GUARD_MARK } from './request-mode.mjs';
 import * as accountStore from './accounts.mjs';
 
 const USAGE_FILE = path.join(STATE_DIR, 'usage.json');
@@ -158,6 +159,9 @@ function renderApiMessages(list, pick) {
  * opts.resume 表示只发新增消息（网页会话里已有更早的内容）。
  */
 function buildApiPrompt(list, tools, opts = {}) {
+  // 提示词形态由「请求模式」决定：raw 原样，safe 在前面插一段使用规范、工具描述更短
+  const reqMode = opts.mode || currentMode();
+  const lim = modeLimits(reqMode);
   const pick = (v) => sanitizePrompt(cleanHistoryText(typeof v === 'string' ? v : contentToText(v)));
   const all = (list || []).filter((m) => m && m.role);
   const sys = all
@@ -207,16 +211,13 @@ function buildApiPrompt(list, tools, opts = {}) {
 
   // 请求体保持「纯 API JSON」：任何说明都作为一条 system 消息放进 messages 里，
   // 不要在 JSON 外面加中文包装。
-  const replyContract = () => ({
-    role: 'system',
-    content: REPLY_JSON
-      ? '回复以 JSON 对象承载：content 写正文（或 null），tool_calls 写工具调用及其 arguments。调用工具时 arguments 要含全部必填参数，类型按 tools 的 schema（数字/布尔用裸值）；不需要工具就不写 tool_calls。不要代码块，不要额外说明。'
-      : '你是 OpenAI 兼容服务端。正常回答直接给正文；需要调用工具时只输出：@@TOOL@@\n{"name":"工具名","arguments":{}}\n@@END@@',
-  });
+  const replyContract = () => contractFor(reqMode, REPLY_JSON);
 
   const build = (part, mode) => {
     const messages = [];
-    if (sys.length && !opts.skipSystem) messages.push(...sys);
+    const withSystem = !opts.skipSystem;
+    if (withSystem && reqMode === 'safe') messages.push(guardMessage());
+    if (sys.length && withSystem) messages.push(...sys);
     for (const m of part) messages.push(toApiMessage(m));
     messages.push(replyContract());
     const body = { model: 'deepseek-web', messages };
@@ -229,25 +230,25 @@ function buildApiPrompt(list, tools, opts = {}) {
   };
 
   let slice = convo;
-  let mode = 'full';
+  let mode = lim.toolMode;
   let out = build(slice, mode);
-  if (estimateTokens(out) > MAX_PROMPT_TOKENS) {
+  if (estimateTokens(out) > lim.maxPromptTokens) {
     mode = 'compact';
     out = build(slice, mode);
   }
   let dropped = 0;
-  while (estimateTokens(out) > MAX_PROMPT_TOKENS && slice.length > 2) {
+  while (estimateTokens(out) > lim.maxPromptTokens && slice.length > 2) {
     const cut = Math.max(1, Math.ceil(slice.length * 0.3));
     slice = slice.slice(cut);
     dropped += cut;
     out = build(slice, mode);
   }
-  if (estimateTokens(out) > MAX_PROMPT_TOKENS) {
+  if (estimateTokens(out) > lim.maxPromptTokens) {
     mode = 'names';
     out = build(slice, mode);
   }
   if (dropped) log('[prompt] dropped ' + dropped + ' old message(s) to fit budget');
-  log('[prompt] size=' + out.length + ' chars ~' + estimateTokens(out) + ' tok tools=' + mode + ' msgs=' + slice.length);
+  log('[prompt] size=' + out.length + ' chars ~' + estimateTokens(out) + ' tok tools=' + mode + ' msgs=' + slice.length + ' mode=' + reqMode);
   return out;
 }
 
@@ -561,7 +562,7 @@ async function handleChat(req, res) {
     prompt = buildApiPrompt(messages, tools);
   }
   log('[ctx] conv=' + convKey.slice(0, 8) + ' mode=' + reason + ' sent=' + transcript.length + ' prompt=' + prompt.length + ' session=' + (continuing ? String(prev.sessionId).slice(0, 8) : 'new'));
-  if (prompt.length > MAX_PROMPT_CHARS) log('[prompt] WARNING oversize ' + prompt.length);
+  if (prompt.length > modeLimits(currentMode()).maxPromptChars) log('[prompt] WARNING oversize ' + prompt.length);
   if (process.env.DSW_DUMP_PROMPT) {
     try { fs.writeFileSync(process.env.DSW_DUMP_PROMPT, prompt); } catch (e) { log('[prompt] dump failed: ' + e.message); }
   }
@@ -1322,9 +1323,12 @@ if (process.env.DSW_SELFTEST_PROMPT) {
     console.log('stripped:', JSON.stringify(stripSentinels(spec.dsml)));
     process.exit(0);
   }
-  const prompt = buildApiPrompt(spec.messages || [], spec.tools || []);
+  const prompt = buildApiPrompt(spec.messages || [], spec.tools || [], spec.mode ? { mode: spec.mode } : {});
+  if (spec.dump) { try { fs.writeFileSync(spec.dump, prompt); } catch {} }
   const doc = renderTools(spec.tools || [], 'full');
   console.log(JSON.stringify({
+    mode: spec.mode || currentMode(),
+    guardInPrompt: prompt.includes(GUARD_MARK),
     chars: prompt.length,
     tokens: estimateTokens(prompt),
     toolDocChars: doc.length,
