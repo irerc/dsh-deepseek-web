@@ -8,6 +8,7 @@ import { createStreamParser } from './stream-parser.mjs';
 import { loadConfig, STATE_DIR } from './config.mjs';
 import { currentMode, modeLimits, guardMessage, contractFor, GUARD_MARK } from './request-mode.mjs';
 import { convLabelOf } from './conv-label.mjs';
+import { estimateTokens, computeUsage } from './usage.mjs';
 import * as accountStore from './accounts.mjs';
 
 const USAGE_FILE = path.join(STATE_DIR, 'usage.json');
@@ -62,6 +63,9 @@ const modelFor = (id) => MODELS.find((m) => m.id === id) || MODELS[0];
 // 注意：工具说明（DSH 有 60+ 个工具）必须完整保留，否则模型不会调用工具。
 const MAX_PROMPT_TOKENS = Number(process.env.DSW_MAX_PROMPT_TOKENS || 118000);
 const MAX_PROMPT_CHARS = Number(process.env.DSW_MAX_PROMPT_CHARS || 330000);
+// 与 cordis.patch.yml 里声明的 131072 保持一致：上报的 prompt_tokens 不能超过它，
+// 否则 pi-ai 会把「成功返回」误判成上下文溢出（见 server/usage.mjs 顶部注释）。
+const CONTEXT_WINDOW = Number(process.env.DSW_CONTEXT_WINDOW || 131072);
 
 function sanitizePrompt(text) {
   return String(text || '')
@@ -317,16 +321,45 @@ function extractToolCalls(text) {
   return { text: stripSentinels(out), calls };
 }
 
+// 工具调用对象里可能出现的「元字段」——其余键都当作参数（模型常把参数平铺在调用对象上，
+// 例如 {"name":"bash","description":"...","command":"pwd"}，以前只认 arguments 就丢了 command）。
+const CALL_META_KEYS = new Set([
+  'name', 'tool', 'type', 'id', 'function', 'arguments', 'args', 'parameters', 'input', 'content', 'role',
+]);
+
+function argsFromCallObject(tc) {
+  if (!tc || typeof tc !== 'object') return {};
+  const fn = tc.function && typeof tc.function === 'object' ? tc.function : null;
+  const raw = fn?.arguments ?? tc.arguments ?? tc.args ?? tc.parameters ?? tc.input ?? null;
+  if (typeof raw === 'string') {
+    const t = raw.trim();
+    if (!t) return {};
+    try { const o = JSON.parse(t); return o && typeof o === 'object' ? o : {}; } catch { return {}; }
+  }
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) return raw;
+  const extra = {};
+  for (const [k, v] of Object.entries(tc)) if (!CALL_META_KEYS.has(k) && v !== undefined) extra[k] = v;
+  return extra;
+}
+
+function callFromObject(tc) {
+  if (!tc || typeof tc !== 'object') return null;
+  const fn = tc.function && typeof tc.function === 'object' ? tc.function : null;
+  const name = fn?.name || tc.name || tc.tool;
+  if (!name) return null;
+  const args = argsFromCallObject(tc);
+  return { name: String(name), arguments: JSON.stringify(args || {}) };
+}
+
 function parseToolJson(body) {
   if (!body) return null;
   const cleaned = body.replace(/^```(?:json)?/i, '').replace(/```$/, '').trim();
   try {
     const obj = JSON.parse(cleaned);
-    const name = obj.name || obj.tool || obj.function?.name;
-    let args = obj.arguments ?? obj.args ?? obj.parameters ?? obj.function?.arguments ?? {};
-    if (typeof args === 'string') { try { args = JSON.parse(args); } catch {} }
-    if (!name) return null;
-    return { name: String(name), arguments: typeof args === 'string' ? args : JSON.stringify(args ?? {}) };
+    // 允许整段是 {"content":null,"tool_calls":[...]} 信封
+    const list = Array.isArray(obj?.tool_calls) ? obj.tool_calls : Array.isArray(obj?.toolCalls) ? obj.toolCalls : null;
+    if (list && list.length) return callFromObject(list[0]) || null;
+    return callFromObject(obj);
   } catch {
     return null;
   }
@@ -402,14 +435,6 @@ function stripSentinels(t) {
 
 function normText(t) {
   return String(t || '').replace(/\s+/g, ' ').trim();
-}
-
-function estimateTokens(text) {
-  if (!text) return 0;
-  let cjk = 0;
-  for (const ch of text) if (/[\u4e00-\u9fff\u3040-\u30ff]/.test(ch)) cjk++;
-  // 系数按 DeepSeek 网页端真实分词器校准（实测中文 ≈1.9 字/token、英文 ≈3.8 token 比）
-  return Math.ceil(cjk * 0.52 + (text.length - cjk) / 3.8);
 }
 
 // ------------------------------------------------------------- conversation map
@@ -611,6 +636,15 @@ async function handleChat(req, res) {
   // 看到开头是 { 就先缓冲，等收完再解析；解析不了就退回当纯文本。
   let jsonMode = false;
   let jsonBuf = '';
+  // 模型按 API 格式回复时，开头可能是 {、[，也可能裹在 ```json 里（先到的第一段只有 ```，
+  // 以前只看首字符不是 { 就直接当正文流出去，用户就看到了整段 {"tool_calls":...}）。
+  const looksLikeEnvelopeStart = (t) => {
+    const s = String(t || '').trimStart();
+    if (!s) return false;
+    if (/^```(?:json)?\s*$/.test(s)) return true;
+    if (/^```(?:json)?\s*[\[{]/.test(s)) return true;
+    return s.startsWith('{') || s.startsWith('[');
+  };
   const emitText = (t) => {
     if (!t) return;
     const clean = stripSentinels(normalizeDelta(t));
@@ -619,7 +653,7 @@ async function handleChat(req, res) {
       jsonBuf += clean;
       return;
     }
-    if (REPLY_JSON && !textOut && clean.trimStart().startsWith('{')) {
+    if (REPLY_JSON && !textOut && looksLikeEnvelopeStart(clean)) {
       jsonMode = true;
       jsonBuf = clean;
       return;
@@ -635,7 +669,7 @@ async function handleChat(req, res) {
     jsonMode = false;
     const raw = jsonBuf;
     jsonBuf = '';
-    const parsed = parseApiReply(raw);
+    const parsed = parseApiReply(raw, toolSchemas);
     if (process.env.DSW_DEBUG_JSON) log('[json] raw=' + raw.length + ' ' + JSON.stringify(raw.slice(0, 160)) + ' parsed=' + Boolean(parsed));
     if (!parsed) {
       // 像「回复信封」但解析不了：绝不能把原始 JSON 当正文吐给用户（那就是满屏 {"role":...}）。
@@ -645,6 +679,15 @@ async function handleChat(req, res) {
         return;
       }
       // 不是信封（比如用户真的想要一段 JSON）：当普通文本处理
+      textOut += raw;
+      if (stream) {
+        if (!headersSent) sendChunk({ role: 'assistant', content: '' });
+        sendChunk({ content: raw });
+      }
+      return;
+    }
+    if (!parsed.content && !parsed.tool_calls.length) {
+      // 解析出来是个普通 JSON（用户就是要一段 JSON）：当正文返回
       textOut += raw;
       if (stream) {
         if (!headersSent) sendChunk({ role: 'assistant', content: '' });
@@ -881,49 +924,39 @@ async function handleChat(req, res) {
     textOut = text;
     calls.push(...late);
   }
-
-
-  // usage 要按「这次请求真实喂进去的上下文」算，否则 GUI 的上下文仪表会显示成 0%
-  const contextParts = [];
-  const tailParts = []; // 最后一条 assistant 之后的内容＝本轮真正新增的部分，不算缓存
-  let tailOpen = false;
-  for (const m of messages) {
-    if (!m || !m.role) continue;
-    const t = typeof m.content === 'string' ? m.content : contentToText(m.content);
-    const callsText = Array.isArray(m.tool_calls) ? JSON.stringify(m.tool_calls) : '';
-    const line = m.role + ': ' + (t || '') + (callsText ? ' ' + callsText : '');
-    contextParts.push(line);
-    if (m.role === 'assistant') { tailParts.length = 0; tailOpen = true; }
-    else if (tailOpen) tailParts.push(line);
+  // 最后一道兜底：正文里如果混进了 {"content":..., "tool_calls":[...]} 这种 API 信封
+  // （常见于模型先写一句说明再贴 JSON，导致流式缓冲没从头开始），把它切出去当工具调用，
+  // 绝不能让这段 JSON 出现在用户可见的正文里。
+  if (!calls.length && /"tool_calls"\s*:/.test(textOut)) {
+    const env = parseApiReply(textOut, toolSchemas);
+    if (env && env.tool_calls.length) {
+      calls.push(...env.tool_calls);
+      textOut = env.content || '';
+      log('[json] recovered tool calls from reply text: ' + env.tool_calls.length);
+    }
   }
-  if (tools.length) contextParts.push('tools: ' + JSON.stringify(tools));
-  const hasAssistant = messages.some((m) => m && m.role === 'assistant');
 
-  // 上游在流里给了真实 token 数（站点自己的分词器，含完整上下文 + 输出），优先用它
+
+  // usage 按「这次真正发给站点的请求」算，并做窗口上限保护（见 server/usage.mjs）。
+  // 站点流里的 accumulated_token_usage 是会话累计消耗（每轮递增），绝不能当本轮 prompt 用：
+  // 长对话里它会到 40 万+，pi-ai 会据此把已成功的回复误判成 CONTEXT_WINDOW_EXCEEDED。
   const upstreamTotal = parser && parser.tokenUsage ? parser.tokenUsage() : 0;
-  const completionTokens = estimateTokens(textOut + reasoningOut);
-  const estimatedPrompt = estimateTokens(contextParts.join('\n'));
-  const promptTokens =
-    upstreamTotal > completionTokens ? Math.max(1, upstreamTotal - completionTokens) : estimatedPrompt;
-
-  // 缓存读取：DeepSeek 的上下文缓存是按「前缀」命中的。同一条对话里，
-  // 除了最后一条 assistant 之后新追加的内容，其余前缀都已经在上下文里了，视为缓存命中。
-  // 全新对话（还没有任何 assistant 消息）没有可命中的前缀，记 0。
-  const tailTokens = estimateTokens(tailParts.join('\n'));
-  const cachedTokens = hasAssistant ? Math.max(0, Math.min(promptTokens - tailTokens, promptTokens)) : 0;
+  const usage = computeUsage({
+    messages,
+    tools,
+    textOut,
+    reasoningOut,
+    contextWindow: CONTEXT_WINDOW,
+    contentToText,
+  });
+  const { promptTokens, completionTokens, cachedTokens } = usage;
   if (chatMap[convKey]) { chatMap[convKey].promptTokens = promptTokens; saveChatMap(); }
-  const usagePayload = {
-    prompt_tokens: promptTokens,
-    completion_tokens: completionTokens,
-    total_tokens: promptTokens + completionTokens,
-    prompt_tokens_details: { cached_tokens: cachedTokens },
-    prompt_cache_hit_tokens: cachedTokens,
-    prompt_cache_miss_tokens: Math.max(0, promptTokens - cachedTokens),
-  };
+  const usagePayload = usage.usagePayload;
   log(
-    '[usage] prompt=' + promptTokens + (upstreamTotal ? '(upstream ' + upstreamTotal + ')' : '(est)') +
-      ' completion=' + completionTokens + ' cached=' + cachedTokens +
-      ' hit=' + (promptTokens ? Math.round((cachedTokens / promptTokens) * 1000) / 10 : 0) + '%',
+    '[usage] prompt=' + promptTokens + '(est) completion=' + completionTokens + ' cached=' + cachedTokens +
+      ' hit=' + (promptTokens ? Math.round((cachedTokens / promptTokens) * 1000) / 10 : 0) + '%' +
+      // 会话累计值只做诊断，不参与 usage
+      (upstreamTotal ? ' accumulated=' + upstreamTotal : ''),
   );
   // 对话标签：交给 conv-label.mjs（跳过「自动检查/续跑」套话，取第一条有内容的用户消息）
   const convLabel = convLabelOf(messages, contentToText);
@@ -1060,10 +1093,24 @@ function scanToolCallsLoose(raw) {
   return out;
 }
 
-function parseApiReply(raw) {
+function parseApiReply(raw, schemas) {
   if (!raw) return null;
   let text = String(raw).trim();
   text = text.replace(/^```(?:json)?/i, '').replace(/```$/, '').trim();
+  // 模型直接回一个调用数组：[{"name":"bash","command":"pwd"}]（没有外层对象）
+  if (text.startsWith('[')) {
+    const end = text.lastIndexOf(']');
+    if (end > 0) {
+      try {
+        const arr = JSON.parse(repairJsonText(text.slice(0, end + 1)));
+        if (Array.isArray(arr)) {
+          const calls = arr.map((tc) => (typeof tc === 'string' ? (() => { try { return callFromObject(JSON.parse(tc)); } catch { return null; } })() : callFromObject(tc))).filter(Boolean);
+          if (schemas && schemas.size) return { content: '', tool_calls: calls.filter((c) => schemas.has(c.name)) };
+          return { content: '', tool_calls: calls };
+        }
+      } catch {}
+    }
+  }
   const i = text.indexOf('{');
   const j = text.lastIndexOf('}');
   if (i < 0 || j <= i) return null;
@@ -1091,18 +1138,18 @@ function parseApiReply(raw) {
   if (Array.isArray(obj.choices) && obj.choices[0] && obj.choices[0].message && typeof obj.choices[0].message === 'object') {
     obj = obj.choices[0].message;
   }
+  // 兼容模型直接回一个「工具调用数组」：[{"name":"bash","command":"pwd"}]
+  if (Array.isArray(obj)) return { content: '', tool_calls: obj.map(callFromObject).filter(Boolean) };
   const content = typeof obj.content === 'string' ? obj.content : '';
   const list = Array.isArray(obj.tool_calls) ? obj.tool_calls : Array.isArray(obj.toolCalls) ? obj.toolCalls : [];
-  const tool_calls = list
-    .map((tc) => {
-      if (!tc) return null;
-      const f = tc.function || tc;
-      const name = f.name || tc.name;
-      if (!name) return null;
-      let args = f.arguments ?? tc.arguments ?? {};
-      return { name: String(name), arguments: typeof args === 'string' ? args : JSON.stringify(args) };
-    })
+  let tool_calls = list
+    .map((tc) => (typeof tc === 'string' ? (() => { try { return callFromObject(JSON.parse(tc)); } catch { return null; } })() : callFromObject(tc)))
     .filter(Boolean);
+  // 只保留真实存在的工具，避免模型瞎编工具名把整轮搞成未知工具错误
+  if (schemas && schemas.size) {
+    // 只保留本轮真正发给模型的工具；模型瞎编的工具名不往下传，免得上层报「未知工具」
+    tool_calls = tool_calls.filter((c) => schemas.has(c.name));
+  }
   return { content, tool_calls };
 }
 
@@ -1309,7 +1356,9 @@ if (process.env.DSW_SELFTEST_PROMPT) {
     process.exit(0);
   }
   if (spec.reply !== undefined) {
-    const parsed = parseApiReply(spec.reply);
+    const schemas = new Map();
+    for (const t of spec.tools || []) { const f = t.function || t; if (f?.name) schemas.set(f.name, f.parameters || {}); }
+    const parsed = parseApiReply(spec.reply, schemas.size ? schemas : undefined);
     console.log('parsed:', JSON.stringify(parsed));
     process.exit(0);
   }

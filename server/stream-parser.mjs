@@ -3,8 +3,9 @@ export function createStreamParser(onDelta) {
   const fragments = [];
   const emitted = new Map(); // key -> 已经下发给客户端的正文/思考
   let responseMessageId = null;
-  // 上游真实 token 数：response.accumulated_token_usage（这条回复「上下文 + 输出」的合计，
-  // 站点用自家分词器算的，比按字数估的准得多）
+  // response.accumulated_token_usage = 本次网页会话累计消耗的 token（每轮递增，
+  // 不是这条回复的上下文大小）。只做诊断日志，绝不能当 usage.prompt_tokens 用，
+  // 否则长对话里会报出 40 万+ 让 pi-ai 误判上下文溢出（见 server/usage.mjs）。
   let tokenUsage = 0;
   let lastError = null;
   let seq = 0;

@@ -9,6 +9,7 @@
 - **设备身份统一（不容易被风控踢下线）**：站点用 `x-device-id`（UUID v4）+ `localStorage["deepseek-device-id:chat"]` 认设备。插件现在让「密码登录 / 内嵌登录页 / 引擎请求」共用同一个稳定的 UUID，同一个账号在站点看来始终是同一台设备；并发 401 的重登也会合并成一次，避免重复登录把自己挤掉。
 - **多账号**：轮询 + 429 冷却 + 401 自动切换，设置界面可增删；支持邮箱密码、内嵌登录窗口、系统浏览器登录、**Apple ID 登录（实验）**，被站点禁言/封号的账号会自动避让。
 - **内嵌登录窗口（实验）**：不用再切浏览器 —— 在设置页「添加账号」里点「在插件里登录（内嵌窗口）」，真实的 DeepSeek 登录页直接嵌在设置页里（同机独立端口镜像，cookie 只存在本机），登录成功后 token 自动回填、窗口自动关闭；账号行也保留「内嵌登录 / 浏览器登录」两条路，另有「用系统浏览器打开」兜底。**账号行的「打开登录页」也走本机代理**（不是 chat.deepseek.com 官网），登录成功后 token 会自动回填到该账号。不喜欢可以一键关掉回到旧方式（见「内嵌登录窗口与回滚」）。
+- **上下文仪表不再说谎**：窗口如实声明 128K，`prompt_tokens` 按本次真实请求算（不信站点那个会话累计值），长对话里既不会误报 100%+，也不会把成功回复误判成上下文溢出。
 - **两种请求模式**：`原始模式` 把提示词原样发出去（不加任何额外说明），`保险模式` 在提示词最前面插一段「使用规范」并把请求放慢、压缩，更不容易被站点风控/禁言 —— 见下文「请求模式」。
 - **账号行布局更清爽**：邮箱/状态徽标占第一行，检查、重新登录、浏览器登录、复制账号密码、改密码、禁用、删除这些按钮**独占第二行**，按钮不会再把「删除」单独挤到下一行。
 - **封号/禁言后可导出账号密码手动登录**：站点风控会把插件内的登录一起拦住，这时点账号行的「复制账号密码」，会把保存的完整邮箱和密码复制到剪贴板，拿去 Chrome 里打开 chat.deepseek.com 手动登录，成功后再把 token 贴回「手动添加」即可。
@@ -30,7 +31,7 @@ git+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web.git
 **② 发行版压缩包（镜像，最快）**
 
 ```
-https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.45/dsh-deepseek-web-1.0.45.tgz
+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.46/dsh-deepseek-web-1.0.46.tgz
 ```
 
 **③ 仓库页（镜像浏览）**
@@ -42,7 +43,7 @@ https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web
 > 镜像不可用时，把上面链接里的 `https://gh-proxy.com/` 去掉即可直连 GitHub（官方速度可能较慢）：
 >
 > - 插件 spec：`https://github.com/irerc/dsh-deepseek-web`
-> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.45/dsh-deepseek-web-1.0.45.tgz`
+> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.46/dsh-deepseek-web-1.0.46.tgz`
 
 **不需要任何 API key**：插件自带 provider 配置与本地网关（`127.0.0.1:18081`），装好即用。
 
@@ -197,6 +198,22 @@ bin/cli.mjs           login/accounts/start/stop/status/doctor
 MIT License
 
 ## 更新日志
+
+### v1.0.46
+
+- **修「本轮运行失败 / CONTEXT_WINDOW_EXCEEDED」**：DSH 的 pi-ai 适配器有一层「静默溢出」判定 —— 成功返回（`stop`）但 `usage.input + cacheRead > contextWindow` 时，会把这一轮判成上下文溢出并整轮丢弃。插件之前把站点 SSE 里的 `response.accumulated_token_usage` 当成「本轮上下文 + 输出」来算 `prompt_tokens`，但它其实是**本次网页会话累计消耗**（每轮都在上一轮基础上继续加，日志里从 1527 一路涨到 459441）；长对话里 `prompt_tokens` 就被算成 40 万+，于是明明成功的回复被误杀成 `CONTEXT_WINDOW_EXCEEDED`。
+  - 新增 `server/usage.mjs`：`prompt_tokens` 改为按**本次真正发给站点的请求**（messages + tools）估算，站点累计值只留作诊断日志（`[usage] ... accumulated=...`）；
+  - 上报值再按声明的 131072 做一次上限钳制，任何情况下都不会因为自己的 usage 越界把成功回复判死；
+  - 顺带修正上下文仪表：以前长对话动辄显示 100%+，现在反映真实请求大小；插件累计用量统计也不再被放大。
+- **上下文窗口改成真实 128K（131072）**：以前为了抬高自动压缩阈值，把窗口虚报成 192K（196608），导致 DSH 上下文仪表一直偏低（100K 只显示 51%）。现在 `contextWindow / defaultContextWindow` 如实写 131072，压缩阈值改由 `compaction-basic` 配置抬到约 110K（`thresholdRatio: 0.85`、`headroomTokens: 4096`），既显示真实又不会几轮就压一次。
+- **修「模型回 JSON 工具调用却不执行」**：模型有时不按约定吐 `@@TOOL@@`，而是直接回一段 OpenAI 信封 `{"content":null,"tool_calls":[{"name":"bash","arguments":{...}}]}`（甚至带 ```json 围栏）。以前这段 JSON 会原样显示在聊天里、命令不执行。现在：
+  - `parseApiReply` 兼容信封式回复：`tool_calls` / 扁平参数（`command` 直接放外层）、`arguments` 是字符串或对象、未知工具名过滤；
+  - 流式输出一旦发现回复以 `{` / `[` / ```json 开头就先缓冲，解析成功再当工具调用发出去，避免前半段 JSON 泄漏成正文；
+  - 流结束后再兜底扫一次正文里的 `"tool_calls"`，仍然解析成真正的工具调用（`json-calls-test.mjs` 8 个用例守住）。
+- **设置界面：灰色小字说明收进「?」按钮**：运行设置、请求模式、登录线路、内嵌窗口、Apple 线路、邮箱密码登录、维护操作等处的次要说明文字，不再各占一整行，统一变成对应控件旁的一个小 `?` 圆点；点一下展开浮层（再点收起，同一时间只开一个），悬停也有 `title` 提示。常用操作和状态（点击展开/收起、脱敏、最后使用、错误提示）仍保持直显。
+- 新增测试 `usage-test.mjs`：长对话不再被累计值污染、pi-ai `isContextOverflow` 不再误判（同时复现旧口径确实会被判溢出）、极端超长请求的钳制、缓存合计不超过 prompt。
+
+> 升级说明：`lib/client.js` 刷新设置页即可；`server/server.mjs`、`server/usage.mjs`、`server/stream-parser.mjs`、`cordis.patch.yml` 需要**重启 DSH** 后生效（重启后上下文仪表和历史会话的用量口径才是新的）。
 
 ### v1.0.45
 

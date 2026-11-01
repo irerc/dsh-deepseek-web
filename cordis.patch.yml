@@ -17,22 +17,31 @@
         # 新设备安装后无需任何密钥即可使用。
         headers:
           authorization: Bearer dsh-deepseek-web
-        # 网页版真实窗口约 128K。DSH 的自动压缩阈值 =
-        # min(窗口×0.8, 窗口 − 回复预留 − headroom)，而 headroom 默认 65536：
-        # 窗口写 131072、预留 32768 时阈值只剩 32768 token，会一两轮就压一次。
-        # 这里把声明窗口放到 192K、回复预留 16384，阈值抬到约 114688，压缩频率降为原来的 1/3.5；
-        # 真发出去的 prompt 仍由插件自己的预算（约 118K token）兜底，不会超过网页版真实上限。
-        defaultContextWindow: 196608
+        # 网页版真实窗口 128K（131072）。这里必须写真实值：
+        # DSH 的上下文仪表 = 最近一次请求的 prompt token / contextWindow，
+        # 以前为了抬高压缩阈值把窗口虚报成 192K，仪表就一直显示偏低（100K 只显示 51%）。
+        # 现在窗口如实写 131072，压缩阈值改由下面的 compaction-basic 配置抬到约 110K。
+        defaultContextWindow: 131072
         defaultMaxTokens: 16384
         models:
           - id: deepseek-chat
             name: DeepSeek-V4(网页版·快速)
-            contextWindow: 196608
+            contextWindow: 131072
             maxTokens: 16384
             input: [text]
           - id: deepseek-reasoner
             name: DeepSeek-V4(网页版·深度思考)
-            contextWindow: 196608
+            contextWindow: 131072
             maxTokens: 16384
             input: [text]
+
+# 自动压缩阈值：DSH 默认 = min(窗口×0.8, 窗口 − 回复预留 − headroom)，headroom 默认 65536。
+# 窗口改成真实 131072 后，按默认值会在 ~49K 就压缩，太勤。
+# 这里把头寸降到 4096、比例抬到 0.85：
+#   min(131072×0.85, 131072 − 16384 − 4096) = 110592 token
+# 和插件自己的提示词预算（原始模式约 118K）对齐 —— 先压缩、不会撞网页版硬上限。
+- id: compaction-basic
+  config:
+    thresholdRatio: 0.85
+    headroomTokens: 4096
 
