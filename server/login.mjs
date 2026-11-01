@@ -64,9 +64,6 @@ export async function sendEmailCode(email) {
 export async function loginWithPassword(email, password, opts = {}) {
   if (!email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return { ok: false, message: '邮箱格式不对' };
   if (!password || String(password).length < 6) return { ok: false, message: '密码看起来不对（至少 6 位）' };
-  if (loadConfig().loginRegion === 'cn') {
-    // 国内站点基本不开放海外邮箱账号的密码登录，这里只提示，不阻断（用户可能确实是国内账号）
-  }
   try {
     const res = await post('/api/v0/users/login', {
       email,

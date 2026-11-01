@@ -22,7 +22,7 @@ export const DEFAULTS = {
   showToolNarration: false, // 调工具的轮次是否显示模型前面的说明文字（大号白字那种「我先看看 XX」）
   // token 失效时，用保存的邮箱+密码自动重新登录（密码在本地加密保存，见 server/credentials.mjs）
   autoRelogin: true,
-  // 登录线路：auto 跟随浏览器；cn 国内（中文、手机号/微信登录）；global 海外（英文、邮箱/Google 登录，可直接注册国外账号）
+  // 登录线路：auto 跟随浏览器；cn 国内（中文登录页，手机号/微信/邮箱都可）；global 英文登录页（邮箱/Google 账号用，大陆网络同样可用）
   loginRegion: 'auto',
   loginHost: '', // 可选：登录页上游域名（默认 chat.deepseek.com，海外可填镜像域名）
   defaultAccount: null, // 不指定时按账号池轮询

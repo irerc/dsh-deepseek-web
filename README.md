@@ -25,7 +25,7 @@ git+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web.git
 **② 发行版压缩包（镜像，最快）**
 
 ```
-https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.34/dsh-deepseek-web-1.0.34.tgz
+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.35/dsh-deepseek-web-1.0.35.tgz
 ```
 
 **③ 仓库页（镜像浏览）**
@@ -37,7 +37,7 @@ https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web
 > 镜像不可用时，把上面链接里的 `https://gh-proxy.com/` 去掉即可直连 GitHub（官方速度可能较慢）：
 >
 > - 插件 spec：`https://github.com/irerc/dsh-deepseek-web`
-> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.34/dsh-deepseek-web-1.0.34.tgz`
+> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.35/dsh-deepseek-web-1.0.35.tgz`
 
 **不需要任何 API key**：插件自带 provider 配置与本地网关（`127.0.0.1:18081`），装好即用。
 
@@ -134,6 +134,10 @@ MIT License
 
 ## 更新日志
 
+### v1.0.35
+
+- **修正「邮箱登录要挂 VPN」的错误说法**：邮箱 + 密码登录在中国大陆网络下本来就能直连使用，不需要 VPN / 代理。界面上的「海外账号需 VPN」徽标改成「国内网络可用」，「海外（邮箱注册）」线路改名为「邮箱（英文页）」，说明文字也改清楚了：邮箱 / Google 账号选「邮箱（英文页）」，国内手机号账号选「国内」，两者都只是登录页语言不同。
+
 ### v1.0.34
 
 - **保存账号密码，token 失效自动重登**：用「邮箱 + 密码」登录时可以勾选「保存账号密码」，密码用本机密钥 AES-256-GCM 加密后存在 `state/accounts.json`（密钥单独放 `credentials.key`，权限 0600），接口永远不会把密码回传前端。
@@ -205,7 +209,7 @@ MIT License
 ### v1.0.24
 
 - **新增「邮箱 + 密码登录」**（不再依赖浏览器）：设置 → DeepSeek 网页版 → 添加账号 →「邮箱 + 密码登录」。
-  - 国外（邮箱注册）账号需要挂 VPN / 海外网络，并把「登录线路」选成「海外（邮箱注册）」。
+  - 邮箱登录在中国大陆网络下**可以直连使用，不需要 VPN**；邮箱 / Google 注册的账号把「登录线路」选成「邮箱（英文页）」即可。
   - 新设备首次登录会被要求邮箱验证码，界面会自动多出发码/填码两栏（支持 MFA 流程）。
   - 登录成功后自动加入账号池，失败会返回服务端原文（如 `PASSWORD_OR_USER_NAME_IS_WRONG`）。
 - **批量登录**：一次粘贴多行 `邮箱----密码` 或 `备注----邮箱----密码`，逐个登录并加入账号池，需要验证码的行会单独列出。
@@ -235,10 +239,10 @@ MIT License
 
 ### v1.0.19
 
-- **登录线路支持国内 / 海外**：设置 → DeepSeek 网页版 → 添加账号 → 「登录线路」三选一。
+- **登录线路支持国内 / 邮箱两种登录页**：设置 → DeepSeek 网页版 → 添加账号 → 「登录线路」三选一。
   - **自动**：跟随浏览器语言（默认）。
-  - **国内**：中文登录页，手机号 / 微信 / 邮箱登录。
-  - **海外（邮箱注册）**：英文登录页，可直接用邮箱注册 DeepSeek 海外账号；登录页右下角新增「没有账号？邮箱注册」入口。
+  - **国内**：中文登录页，手机号 / 微信 / 邮箱都能登。
+  - **邮箱（英文页）**：英文登录页，邮箱或 Google 注册的账号用它；大陆网络同样可用，不需要代理。
   - 发验证码的 `locale` 也会跟着线路切换（zh_CN / en_US），登录页状态栏会显示当前线路。
 - **对话详情显示对话名称**：用量卡片里的各对话详情不再显示一串哈希 ID，改成该对话第一条用户消息（如「帮我统计一下这个仓库里 mjs 文件的数量…」），最多 40 字；老记录没有名称时仍回退显示 ID。
 
