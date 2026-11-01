@@ -24,8 +24,13 @@ export async function reloginAccount(id, { reason = 'chat' } = {}) {
     return { ok: false, skipped: true, message: '自动重新登录已关闭' };
   }
   const cred = getCredential(id);
-  if (!cred || !cred.email || !cred.password) {
+  if (!cred || !cred.password) {
     return { ok: false, noCredential: true, message: '这个账号没有保存密码' };
+  }
+  if (!cred.email || cred.email.includes('*')) {
+    // 存的是脱敏地址（站点返回的 262*****77@qq.com），拿去登录必然失败，别再空跑
+    markReloginFailed(id, '保存的是脱敏邮箱');
+    return { ok: false, noCredential: true, message: '保存的邮箱是脱敏地址（含 *），请在账号行点「改密码」重新填一次完整邮箱和密码' };
   }
   if (reason !== 'manual') {
     const until = cooldownUntil.get(id) || 0;

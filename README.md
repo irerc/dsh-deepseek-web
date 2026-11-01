@@ -25,7 +25,7 @@ git+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web.git
 **② 发行版压缩包（镜像，最快）**
 
 ```
-https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.35/dsh-deepseek-web-1.0.35.tgz
+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.36/dsh-deepseek-web-1.0.36.tgz
 ```
 
 **③ 仓库页（镜像浏览）**
@@ -37,7 +37,7 @@ https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web
 > 镜像不可用时，把上面链接里的 `https://gh-proxy.com/` 去掉即可直连 GitHub（官方速度可能较慢）：
 >
 > - 插件 spec：`https://github.com/irerc/dsh-deepseek-web`
-> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.35/dsh-deepseek-web-1.0.35.tgz`
+> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.36/dsh-deepseek-web-1.0.36.tgz`
 
 **不需要任何 API key**：插件自带 provider 配置与本地网关（`127.0.0.1:18081`），装好即用。
 
@@ -133,6 +133,13 @@ bin/cli.mjs           login/accounts/start/stop/status/doctor
 MIT License
 
 ## 更新日志
+
+### v1.0.36
+
+- **账号列表显示完整邮箱**：站点的用户接口只返回脱敏地址（如 `262*****77@qq.com`），以前就把它当账号名存了下来，看着分不清是谁、拿去自动重登还会必然失败。现在邮箱分两个字段：`emailFull` 只存用户自己填过的完整地址并优先显示；上游回的脱敏地址只作兜底，并在旁边标「（脱敏）」。
+- **补邮箱不用带密码**：账号行按钮变成「填邮箱」（脱敏时）/「存密码」，只填一个完整邮箱也能保存（会做格式校验，拒绝保存带 `*` 的地址）；保存后列表立刻显示完整地址。
+- **脱敏地址不再空跑重登**：如果保存的邮箱是带 `*` 的地址，自动重登会直接给出「请填完整邮箱和密码」的提示，不会每两分钟拿一个必然失败的地址去登录一次。
+- 用邮箱 + 密码登录时，`users/login` 拿到的是脱敏邮箱，但登录表单里填的是完整地址，现在会存成 `emailFull`，所以新登录的账号一开始就显示完整邮箱。
 
 ### v1.0.35
 

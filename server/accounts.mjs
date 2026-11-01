@@ -41,13 +41,28 @@ function save(doc) {
   fs.renameSync(tmp, ACCOUNTS_FILE);
 }
 
+/** 站点返回的邮箱是脱敏的（如 262*****77@qq.com）：判断一下，别把脱敏地址当账号名用 */
+export function isMaskedEmail(value) {
+  return typeof value === 'string' && value.includes('*');
+}
+
+/** 这个账号能拿到的完整邮箱（优先用户自己填过的） */
+function fullEmailOf(a) {
+  for (const v of [a.emailFull, a.loginEmail, a.email]) {
+    if (v && !isMaskedEmail(v)) return v;
+  }
+  return '';
+}
+
 export function publicAccount(a) {
   const now = Date.now();
   const cooling = a.cooldownUntil && a.cooldownUntil > now;
   return {
     id: a.id,
     label: a.label,
-    email: a.email || '',
+    // email 优先给完整地址；只有脱敏地址时也返回，但标记 emailMasked，界面提示用户补全
+    email: fullEmailOf(a) || a.email || '',
+    emailMasked: !fullEmailOf(a) && isMaskedEmail(a.email),
     userId: a.userId || '',
     status: a.disabled ? 'disabled' : a.status === 'authExpired' ? 'authExpired' : cooling ? 'cooling' : 'ok',
     cooldownUntil: cooling ? a.cooldownUntil : null,
@@ -71,12 +86,14 @@ export function addAccount({ token, label, cookie = '', email = '', userId = '',
   const exists = doc.accounts.find((a) => a.token === token);
   if (exists) {
     if (cookie) exists.cookie = cookie;
-    if (email) exists.email = email;
+    if (email && !isMaskedEmail(email)) exists.emailFull = email;
+    if (email && !exists.email) exists.email = email;
     if (userId) exists.userId = userId;
     if (label) exists.label = label;
     if (password) {
       exists.loginPassword = encrypt(password);
-      exists.loginEmail = loginEmail || email || exists.email || '';
+      const credEmail = [loginEmail, email, exists.emailFull, exists.email].find((v) => v && !isMaskedEmail(v));
+      exists.loginEmail = credEmail || '';
       exists.loginSavedAt = Date.now();
       exists.reloginBlocked = '';
     }
@@ -89,9 +106,10 @@ export function addAccount({ token, label, cookie = '', email = '', userId = '',
     token,
     cookie: cookie || '',
     email: email || '',
+    emailFull: email && !isMaskedEmail(email) ? email : '',
     userId: userId || '',
     // 保存的登录凭证（加密后存这里，见 credentials.mjs）
-    loginEmail: password ? loginEmail || email || '' : '',
+    loginEmail: password ? [loginEmail, email].find((v) => v && !isMaskedEmail(v)) || '' : '',
     loginPassword: password ? encrypt(password) : '',
     loginSavedAt: password ? Date.now() : 0,
     addedAt: Date.now(),
@@ -197,8 +215,11 @@ export function setCredential(id, { email = '', password = '' } = {}) {
   const account = doc.accounts.find((a) => a.id === id || a.label === id);
   if (!account) return null;
   if (password) account.loginPassword = encrypt(String(password));
-  if (email) account.loginEmail = String(email).trim();
-  if (!account.loginEmail && account.email) account.loginEmail = account.email;
+  const trimmed = String(email || '').trim();
+  if (trimmed && !isMaskedEmail(trimmed)) {
+    account.loginEmail = trimmed;
+    account.emailFull = trimmed;
+  }
   account.loginSavedAt = Date.now();
   account.reloginBlocked = '';
   save(doc);
@@ -212,7 +233,7 @@ export function getCredential(id) {
   if (!account || !account.loginPassword) return null;
   const password = decrypt(account.loginPassword);
   if (!password) return null;
-  return { email: account.loginEmail || account.email || '', password };
+  return { email: fullEmailOf(account) || account.loginEmail || '', password };
 }
 
 /** 忘记保存的密码 */
@@ -224,6 +245,18 @@ export function clearCredential(id) {
   delete account.loginEmail;
   delete account.loginSavedAt;
   account.reloginBlocked = '';
+  save(doc);
+  return publicAccount(account);
+}
+
+/** 用上游返回的用户信息补账号名（上游邮箱是脱敏的，绝不会覆盖已知的完整地址） */
+export function noteEmail(id, { email = '', userId = '' } = {}) {
+  const doc = loadAccounts();
+  const account = doc.accounts.find((a) => a.id === id || a.label === id);
+  if (!account) return null;
+  if (email && !isMaskedEmail(email)) account.emailFull = email;
+  else if (email && !fullEmailOf(account)) account.email = email;
+  if (userId) account.userId = userId;
   save(doc);
   return publicAccount(account);
 }
@@ -240,7 +273,10 @@ export function replaceToken(id, token, user = {}) {
   account.lastReloginAt = Date.now();
   account.reloginFailures = 0;
   account.reloginBlocked = '';
-  if (user?.email) account.email = user.email;
+  if (user?.email) {
+    if (!isMaskedEmail(user.email)) account.emailFull = user.email;
+    else if (!fullEmailOf(account)) account.email = user.email;
+  }
   if (user?.id) account.userId = user.id;
   save(doc);
   return publicAccount(account);
