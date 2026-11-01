@@ -65,11 +65,15 @@ export async function loginWithPassword(email, password, opts = {}) {
   if (!email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return { ok: false, message: '邮箱格式不对' };
   if (!password || String(password).length < 6) return { ok: false, message: '密码看起来不对（至少 6 位）' };
   try {
+    // 字段和站点前端保持一致（多了 mobile/area_code 空串、os=web）：
+    // 少字段的请求更容易被风控当成脚本，见 RISK_DEVICE_DETECTED
     const res = await post('/api/v0/users/login', {
       email,
+      mobile: '',
+      area_code: '',
       password,
       device_id: deviceId(),
-      os: 'android',
+      os: 'web',
     });
     const biz = res.json?.data?.biz_data || {};
     const code = res.json?.data?.biz_code;

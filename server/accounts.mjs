@@ -72,7 +72,10 @@ export function publicAccount(a) {
     // 是否保存了账号密码（只给前端一个布尔值，密码本身永远不出后端）
     hasPassword: Boolean(a.loginPassword),
     lastReloginAt: a.lastReloginAt || null,
-    reloginBlocked: a.reloginBlocked === 'needCode' ? 'needCode' : '',
+    // needCode：要邮箱验证码；needBrowserLogin：HTTP 密码登录被设备风控拦了，得走真实网页登录
+    reloginBlocked: a.reloginBlocked === 'needCode' || a.reloginBlocked === 'needBrowserLogin' ? a.reloginBlocked : '',
+    needBrowserLogin: a.reloginBlocked === 'needBrowserLogin',
+    reloginFailures: a.reloginFailures || 0,
   };
 }
 
@@ -282,14 +285,14 @@ export function replaceToken(id, token, user = {}) {
   return publicAccount(account);
 }
 
-/** 自动重登失败：记下原因（needCode 时界面会提示去手动补验证码） */
-export function markReloginFailed(id, message = '', { needCode = false } = {}) {
+/** 自动重登失败：记下原因（needCode / needBrowserLogin 时界面会给对应的手动入口） */
+export function markReloginFailed(id, message = '', { needCode = false, needBrowserLogin = false } = {}) {
   const doc = loadAccounts();
   const account = doc.accounts.find((a) => a.id === id || a.label === id);
   if (!account) return null;
   account.reloginFailures = (account.reloginFailures || 0) + 1;
   account.lastReloginFailAt = Date.now();
-  account.reloginBlocked = needCode ? 'needCode' : String(message || '').slice(0, 200);
+  account.reloginBlocked = needCode ? 'needCode' : needBrowserLogin ? 'needBrowserLogin' : String(message || '').slice(0, 200);
   save(doc);
   return publicAccount(account);
 }

@@ -12,6 +12,7 @@ import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
 import { loadConfig, STATE_DIR } from './config.mjs';
+import { peekTicket, dropTicket } from './autologin.mjs';
 const SID_COOKIE = 'dsweb_sid';
 function jarFile(sid) {
   return path.join(STATE_DIR, 'jar-' + sid.replace(/[^a-zA-Z0-9_-]/g, '') + '.json');
@@ -195,6 +196,31 @@ function fetchUpstream(target, method, headers, body, attempts = 3, timeoutMs = 
 
 export function startLoginProxy({ port = 18090, reportUrl }) {
   const server = http.createServer(async (req, res) => {
+    // ---- 本机专用接口：登录页凭票据取回要自动填写的账号密码（不转发给站点）----
+    // 页面与这里同源（都是 127.0.0.1:18090），所以不需要 CORS。
+    if (req.method === 'GET' && req.url.startsWith('/__dsweb/prefill')) {
+      let ticket = '';
+      try { ticket = new URL(req.url, 'http://127.0.0.1').searchParams.get('t') || ''; } catch {}
+      const info = peekTicket(ticket);
+      logLine('AUTOFILL ' + (info ? 'ok' : 'miss') + (info?.accountId ? ' account=' + info.accountId : ''));
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+      res.end(
+        JSON.stringify(
+          info
+            ? { ok: true, email: info.email || '', password: info.password || '', accountId: info.accountId || '', ticket }
+            : { ok: false, message: '自动登录票据已过期，请回到插件设置页再点一次「浏览器登录」' },
+        ),
+      );
+      return;
+    }
+    if (req.method === 'POST' && req.url.startsWith('/__dsweb/done')) {
+      let ticket = '';
+      try { ticket = new URL(req.url, 'http://127.0.0.1').searchParams.get('t') || ''; } catch {}
+      dropTicket(ticket);
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+      res.end('{"ok":true}');
+      return;
+    }
     const isCdn = req.url.startsWith('/cdn/');
     const upstreamHost = isCdn ? CDN : siteHost();
     const upstreamPath = isCdn ? CDN_PREFIX + req.url.slice('/cdn/'.length) : req.url;

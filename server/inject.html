@@ -45,7 +45,7 @@
     fetch(REPORT, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ token: token, label: '浏览器登录', sid: sidCookie(), source: source, email: loginEmail || domEmail() })
+      body: JSON.stringify({ token: token, label: '浏览器登录', sid: sidCookie(), source: source, email: loginEmail || domEmail(), accountId: window.__dswebAccountId || '' })
     }).then(function (r) { return r.json(); }).then(function (d) {
       if (d && d.ok) {
         tip('已保存到 DSH 插件 ✓（来源 ' + source + '），可以关闭本页了');
@@ -393,5 +393,149 @@
   syncAuthUi();
   window.addEventListener('popstate', syncAuthUi);
   setInterval(syncAuthUi, 1200);
+})();
+</script>
+<script>
+/*
+ * 浏览器自动登录：插件点「浏览器登录」时会在 URL 上带一张短时效票据（__dsweb_auto=…）。
+ * 本脚本凭票据向本机登录代理取回账号密码，自动填进站点登录表单并提交。
+ * 站点自己完成风控/PoW/验证码流程，所以这条路不会被 RISK_DEVICE_DETECTED 拦住。
+ * 注意：验证码（邮箱 6 位码）没法自动填，需要用户在这一页手动输入。
+ */
+(function () {
+  var KEY = 'dsweb_auto_ticket';
+  var ticket = '';
+  try {
+    var m = /[?&]__dsweb_auto=([a-f0-9]{8,64})/i.exec(location.search || '');
+    if (m) {
+      ticket = m[1];
+      try { sessionStorage.setItem(KEY, ticket); } catch (e) {}
+    } else {
+      ticket = sessionStorage.getItem(KEY) || '';
+    }
+  } catch (e) {}
+  if (!ticket) return;
+  var path = location.pathname || '/';
+  if (path.indexOf('/sign_in') !== 0 && path !== '/' && path.indexOf('/sign_up') !== 0) return;
+
+  var info = null;
+  var filling = false;
+  var submits = 0;
+  var lastSubmit = 0;
+  var startedAt = Date.now();
+
+  function tip(msg) {
+    try { console.log('[dsweb-auto]', msg); } catch (e) {}
+    var el = document.getElementById('__dsweb_tip');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = '__dsweb_tip';
+      el.style.cssText = 'position:fixed;left:8px;bottom:8px;right:8px;z-index:99998;font:12px monospace;background:rgba(0,0,0,.82);color:#ffd479;padding:8px;border-radius:8px;max-height:35vh;overflow:auto;white-space:pre-wrap';
+      document.body.appendChild(el);
+    }
+    el.textContent = String(msg);
+  }
+
+  function visible(el) {
+    if (!el) return false;
+    var r = el.getBoundingClientRect();
+    return r.width > 2 && r.height > 2;
+  }
+  function emailInput() {
+    var list = document.querySelectorAll('input[type=email], input[name=email], input[autocomplete=username], input[placeholder]');
+    for (var i = 0; i < list.length; i++) {
+      var el = list[i];
+      if (!visible(el) || el.type === 'password') continue;
+      var ph = String(el.placeholder || '') + ' ' + String(el.name || '') + ' ' + String(el.type || '');
+      if (/邮箱|email|账号|account|用户名/i.test(ph)) return el;
+    }
+    var any = document.querySelector('input[type=email]');
+    return visible(any) ? any : null;
+  }
+  function passwordInput() {
+    var list = document.querySelectorAll('input[type=password]');
+    for (var i = 0; i < list.length; i++) if (visible(list[i])) return list[i];
+    return null;
+  }
+  function setVal(el, value) {
+    var proto = Object.getPrototypeOf(el);
+    var desc = Object.getOwnPropertyDescriptor(proto, 'value') || Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
+    if (desc && desc.set) desc.set.call(el, value);
+    else el.value = value;
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+  function findByText(re) {
+    var nodes = document.querySelectorAll('button, [role=button], a, div');
+    for (var i = 0; i < nodes.length; i++) {
+      var t = String(nodes[i].textContent || '').trim();
+      if (!t || t.length > 12) continue;
+      if (re.test(t) && visible(nodes[i])) return nodes[i];
+    }
+    return null;
+  }
+  function submitForm(pass) {
+    var form = pass && pass.closest && pass.closest('form');
+    if (form && form.requestSubmit) { form.requestSubmit(); return true; }
+    var btn = findByText(/^(登录|登 录|立即登录|Log ?in|Sign ?in)$/i);
+    if (btn) { btn.click(); return true; }
+    if (pass) {
+      ['keydown', 'keypress', 'keyup'].forEach(function (type) {
+        pass.dispatchEvent(new KeyboardEvent(type, { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
+      });
+      return true;
+    }
+    return false;
+  }
+
+  fetch('/__dsweb/prefill?t=' + encodeURIComponent(ticket), { cache: 'no-store' })
+    .then(function (r) { return r.json(); })
+    .then(function (d) {
+      if (!d || !d.ok) {
+        tip('自动登录票据无效：' + ((d && d.message) || '请回到插件重新点「浏览器登录」'));
+        try { sessionStorage.removeItem(KEY); } catch (e) {}
+        return;
+      }
+      info = d;
+      try { window.__dswebAccountId = d.accountId || ''; } catch (e) {}
+      tip('已取到保存的账号，正在自动填入…');
+      fillLoop();
+    })
+    .catch(function (e) {
+      tip('取账号失败：' + (e && e.message ? e.message : e));
+    });
+
+  function fillLoop() {
+    if (!info || filling) return;
+    var emailEl = emailInput();
+    var passEl = passwordInput();
+    if (!passEl && Date.now() - startedAt > 2500) {
+      var tab = findByText(/密码登录|密码|Password|Use password/i);
+      if (tab && tab.getAttribute('data-dsweb-tab') !== '1') {
+        tab.setAttribute('data-dsweb-tab', '1');
+        tab.click();
+      }
+    }
+    filling = true;
+    try {
+      if (emailEl && info.email && emailEl.value !== info.email) setVal(emailEl, info.email);
+      if (passEl && info.password && passEl.value !== info.password) setVal(passEl, info.password);
+    } finally {
+      filling = false;
+    }
+    // 填完了就提交；如果站点还没渲染完，下一轮继续
+    if (emailEl && passEl && info.password && info.email && submits < 3 && Date.now() - lastSubmit > 5000) {
+      if (submitForm(passEl)) {
+        submits += 1;
+        lastSubmit = Date.now();
+        tip('已自动填入并提交（第 ' + submits + ' 次），等待站点登录结果…');
+      }
+    }
+    if (Date.now() - startedAt > 40000) {
+      tip('自动填写已停止。若还停在登录页，请检查密码或点「登录」按钮；需要验证码时请输入邮箱验证码。');
+      return;
+    }
+    setTimeout(fillLoop, 500);
+  }
 })();
 </script>

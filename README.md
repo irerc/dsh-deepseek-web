@@ -7,7 +7,7 @@
 
 - **不需要浏览器**：Node 直连网页接口（PoW 用站点自带的 wasm 在本地算），因此在 Android/proot 容器里也能跑。
 - **多账号**：轮询 + 429 冷却 + 401 自动切换，设置界面可增删。
-- **保存密码、失效自动重登**：可选把账号密码加密存在本机，token 过期/被踢下线时自动重新登录，不用再手动贴 token。
+- **保存密码、失效自动重登**：可选把账号密码加密存在本机，token 过期/被踢下线时自动重新登录，不用再手动贴 token；万一被站点判定「设备风控」（`RISK_DEVICE_DETECTED`）挡住了脚本登录，点「浏览器登录」会在真实网页里自动填好账号密码登一次，token 原地换回来。
 - **选模型即启动**：平时只监听一个极轻量的入口，首次调用网页版模型时才拉起引擎，空闲自动休眠。
 - **自带设置界面**：DSH 设置 →「DeepSeek 网页版」，可登录、管理账号、调参、看日志。
 - **即装即用**：包内自带 `cordis.patch.yml`，安装后由 DSH 自动应用 provider 配置。
@@ -25,7 +25,7 @@ git+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web.git
 **② 发行版压缩包（镜像，最快）**
 
 ```
-https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.36/dsh-deepseek-web-1.0.36.tgz
+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.37/dsh-deepseek-web-1.0.37.tgz
 ```
 
 **③ 仓库页（镜像浏览）**
@@ -37,7 +37,7 @@ https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web
 > 镜像不可用时，把上面链接里的 `https://gh-proxy.com/` 去掉即可直连 GitHub（官方速度可能较慢）：
 >
 > - 插件 spec：`https://github.com/irerc/dsh-deepseek-web`
-> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.36/dsh-deepseek-web-1.0.36.tgz`
+> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.37/dsh-deepseek-web-1.0.37.tgz`
 
 **不需要任何 API key**：插件自带 provider 配置与本地网关（`127.0.0.1:18081`），装好即用。
 
@@ -133,6 +133,14 @@ bin/cli.mjs           login/accounts/start/stop/status/doctor
 MIT License
 
 ## 更新日志
+
+### v1.0.37
+
+- **被设备风控拦下时改用「浏览器登录」（自动填表）**：站点的 `users/login` 会回 `RISK_DEVICE_DETECTED`（设备风控），脚本密码登录这条路从此一直是死的。现在认得出这个错误：账号行直接提示「站点设备风控拦住了脚本密码登录」，并给出「浏览器登录」按钮 —— 点一下就在真实网页里打开登录页，**保存的邮箱和密码会自动填进表单并提交**（站点的 JS 自己完成风控/PoW），登录成功后 token **原地回填到同一个账号**，不会多出一个重复账号。需要邮箱验证码时在这一页输入 6 位码即可。
+- **风控期间不再反复撞**：命中风控后该账号冷却 6 小时，后台扫描（启动时 + 每 10 分钟）也不会再拿它去试密码登录，避免越撞越黑；点「改密码」重新保存凭证或「浏览器登录」成功后标记自动清除。
+- **自动重登的退避更合理**：验证码 30 分钟、风控 6 小时、限流 10 分钟、密码错 5 分钟，各自分开处理，不再把「密码错」和「被风控」混成一个模糊的失败提示。
+- **登录请求体对齐站点前端**：`users/login` 补上 `mobile` / `area_code` 空字段、`os` 改成 `web`，少字段的请求更容易被当成脚本。
+- 顺手修掉：浏览器登录回填 token 时按账号 id 原地更新，之前会新增一个「浏览器登录」账号。
 
 ### v1.0.36
 
