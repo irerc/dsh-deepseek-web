@@ -7,7 +7,7 @@
 
 - **不需要浏览器**：Node 直连网页接口（PoW 用站点自带的 wasm 在本地算），因此在 Android/proot 容器里也能跑。
 - **多账号**：轮询 + 429 冷却 + 401 自动切换，设置界面可增删；支持邮箱密码、内嵌登录窗口、系统浏览器登录、**Apple ID 登录（实验）**，被站点禁言/封号的账号会自动避让。
-- **内嵌登录窗口（实验）**：不用再切浏览器 —— 在设置页「添加账号」里点「在插件里登录（内嵌窗口）」，真实的 DeepSeek 登录页直接嵌在设置页里（同机独立端口镜像，cookie 只存在本机），登录成功后 token 自动回填、窗口自动关闭；账号行也保留「内嵌登录 / 浏览器登录」两条路，另有「用系统浏览器打开」兜底。不喜欢可以一键关掉回到旧方式（见「内嵌登录窗口与回滚」）。
+- **内嵌登录窗口（实验）**：不用再切浏览器 —— 在设置页「添加账号」里点「在插件里登录（内嵌窗口）」，真实的 DeepSeek 登录页直接嵌在设置页里（同机独立端口镜像，cookie 只存在本机），登录成功后 token 自动回填、窗口自动关闭；账号行也保留「内嵌登录 / 浏览器登录」两条路，另有「用系统浏览器打开」兜底。**账号行的「打开登录页」也走本机代理**（不是 chat.deepseek.com 官网），登录成功后 token 会自动回填到该账号。不喜欢可以一键关掉回到旧方式（见「内嵌登录窗口与回滚」）。
 - **两种请求模式**：`原始模式` 把提示词原样发出去（不加任何额外说明），`保险模式` 在提示词最前面插一段「使用规范」并把请求放慢、压缩，更不容易被站点风控/禁言 —— 见下文「请求模式」。
 - **账号行布局更清爽**：邮箱/状态徽标占第一行，检查、重新登录、浏览器登录、复制账号密码、改密码、禁用、删除这些按钮**独占第二行**，按钮不会再把「删除」单独挤到下一行。
 - **封号/禁言后可导出账号密码手动登录**：站点风控会把插件内的登录一起拦住，这时点账号行的「复制账号密码」，会把保存的完整邮箱和密码复制到剪贴板，拿去 Chrome 里打开 chat.deepseek.com 手动登录，成功后再把 token 贴回「手动添加」即可。
@@ -29,7 +29,7 @@ git+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web.git
 **② 发行版压缩包（镜像，最快）**
 
 ```
-https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.42/dsh-deepseek-web-1.0.42.tgz
+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.43/dsh-deepseek-web-1.0.43.tgz
 ```
 
 **③ 仓库页（镜像浏览）**
@@ -41,7 +41,7 @@ https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web
 > 镜像不可用时，把上面链接里的 `https://gh-proxy.com/` 去掉即可直连 GitHub（官方速度可能较慢）：
 >
 > - 插件 spec：`https://github.com/irerc/dsh-deepseek-web`
-> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.42/dsh-deepseek-web-1.0.42.tgz`
+> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.43/dsh-deepseek-web-1.0.43.tgz`
 
 **不需要任何 API key**：插件自带 provider 配置与本地网关（`127.0.0.1:18081`），装好即用。
 
@@ -176,6 +176,18 @@ bin/cli.mjs           login/accounts/start/stop/status/doctor
 MIT License
 
 ## 更新日志
+
+### v1.0.43
+
+- **修「打开登录页」登录后拿不到 token**：账号行的「打开登录页」以前直接 `window.open('https://chat.deepseek.com/sign_in')`，那是**站点官网**，页面上没有插件注入脚本，登录完 token 不会回传，插件永远等不到。现在改成走本机登录代理（`127.0.0.1:18090/sign_in`，也就是 `/login/browser` 背后的真实地址）：
+  - 系统浏览器能接（手机端）就交给系统浏览器；桌面端 `window.open` 新标签页；
+  - 登录成功后注入脚本照常回传 token，账号状态原地更新 —— 不用再手动复制 token；
+  - URL 带上 `__dsweb_acct=<账号id>`，回传的 token **原地替换这个账号**，不会在账号池里多出一个重复账号。
+- **`/login/browser` 返回值更诚实**：以前固定回 `opened: true`（桌面端其实没开），现在真的去等设备桥 `/app/open` 的结果：`opened: false` 时前端才知道要自己开新标签页。
+- **没存密码的异常账号也能内嵌登录**：登录失效 / 被封 / 禁言 / 需要浏览器登录、且没保存密码的账号，现在也显示「内嵌登录」按钮（不自动填表），登录成功后 token 原地替换该账号，不用再走「复制 token → 手动添加」。
+- **注入脚本识别 `__dsweb_acct`**：登录页从这个参数知道「这次登录的是哪个账号」，回传时带上 `accountId`，宿主用 `replaceToken` 原地更新。
+
+> 升级说明：`lib/client.js` 刷新设置页即可；`lib/index.js`、`server/inject.html`、`server/config.mjs` 需要**重启 DSH**（或等宿主热重载）后生效。
 
 ### v1.0.42
 

@@ -16,6 +16,14 @@
   // 内嵌模式：设置页把登录页放在 iframe 里（独立端口 = 独立 origin）。登录成功要通知父页面
   // 关闭窗口并刷新账号列表——父子不同源，只能靠 postMessage，父页面会校验 origin。
   var IN_FRAME = (function () { try { return window.top !== window.self; } catch (e) { return true; } })();
+  // 指定账号登录：插件打开登录页时会带 __dsweb_acct=<账号 id>，
+  // 这样登录成功后回传的 token 会原地替换这个账号，而不是在账号池里多出一个重复账号。
+  (function () {
+    try {
+      var m = /[?&]__dsweb_acct=([A-Za-z0-9_-]{4,40})/i.exec(location.search || '');
+      if (m) window.__dswebAccountId = m[1];
+    } catch (e) {}
+  })();
   function notifyParent(kind, extra) {
     if (!IN_FRAME) return;
     try {
