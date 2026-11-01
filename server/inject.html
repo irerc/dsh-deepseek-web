@@ -11,10 +11,27 @@
   var sent = {};   // token -> true 表示已经成功保存
   var tries = {};  // token -> 尝试次数，避免同一个失效 token 反复重试
   var TOKEN_RE = /^[A-Za-z0-9+/=_-]{30,300}$/;
+  var loginEmail = ''; // 用户在登录表单里填的完整邮箱（站点接口只回脱敏地址，这个更准）
 
   function looksToken(v) {
     return typeof v === 'string' && TOKEN_RE.test(v) && v.length >= 30;
   }
+  function rememberEmail(v) {
+    if (typeof v !== 'string') return;
+    var e = v.trim();
+    if (!e || e.length > 200 || e.indexOf('@') < 0 || e.indexOf('*') >= 0) return;
+    loginEmail = e;
+  }
+
+  // 兜底：登录表单里的邮箱输入框
+  function domEmail() {
+    try {
+      var el = document.querySelector('input[type=email]');
+      if (el && el.value) { rememberEmail(el.value); return loginEmail; }
+    } catch (e) {}
+    return '';
+  }
+
   function sidCookie() {
     var m = /(?:^|;\s*)dsweb_sid=([^;]+)/.exec(document.cookie || '');
     return m ? m[1] : '';
@@ -28,7 +45,7 @@
     fetch(REPORT, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ token: token, label: '浏览器登录', sid: sidCookie(), source: source })
+      body: JSON.stringify({ token: token, label: '浏览器登录', sid: sidCookie(), source: source, email: loginEmail || domEmail() })
     }).then(function (r) { return r.json(); }).then(function (d) {
       if (d && d.ok) {
         tip('已保存到 DSH 插件 ✓（来源 ' + source + '），可以关闭本页了');
@@ -51,6 +68,11 @@
     window.fetch = function (input, init) {
       var url = typeof input === 'string' ? input : ((input && input.url) || '');
       var slow = setTimeout(function () { tip('请求超时 15s 仍未返回：' + url); }, 15000);
+      try {
+        if (/\/api\/v0\/users\//.test(url) && init && typeof init.body === 'string' && init.body.charAt(0) === '{') {
+          rememberEmail(JSON.parse(init.body).email);
+        }
+      } catch (e) {}
       try {
         var h = (init && init.headers) || (input && input.headers) || null;
         if (h) {
@@ -99,8 +121,13 @@
     } catch (e) {}
     return _setHeader.apply(this, arguments);
   };
-  XMLHttpRequest.prototype.send = function () {
+  XMLHttpRequest.prototype.send = function (body) {
     var xhr = this;
+    try {
+      if (/\/api\/v0\/users\//.test(xhr.__u || '') && typeof body === 'string' && body.charAt(0) === '{') {
+        rememberEmail(JSON.parse(body).email);
+      }
+    } catch (e) {}
     xhr.addEventListener('loadend', function () {
       if (xhr.status === 0 || xhr.status >= 400) tip('XHR ' + xhr.status + ' ' + xhr.__u);
       try {
