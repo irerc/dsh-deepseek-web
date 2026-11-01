@@ -3,6 +3,7 @@ import { BASE, UA, post, get, classify, UpstreamError, baseHeaders } from './htt
 import { solvePowHeader } from './pow.mjs';
 import { loadConfig } from './config.mjs';
 import { pickAccount, markUsed, markCooldown, markAuthExpired, listAccounts, getToken, getCookie } from './accounts.mjs';
+import { reloginAccount } from './relogin.mjs';
 import { createStreamParser } from './stream-parser.mjs';
 
 const lastSentAt = new Map(); // accountId -> timestamp
@@ -137,9 +138,13 @@ export class DeepSeekHttp {
     const cfg = loadConfig();
     const tried = new Set();
     let lastError = null;
+    let prefer = preferAccount;
+    let reloginTried = false;
+    const accountCount = Math.max(1, listAccounts().length || 1);
 
-    for (let attempt = 0; attempt < Math.max(1, Math.min(4, listAccounts().length || 1)); attempt++) {
-      const account = pickAccount({ prefer: preferAccount, exclude: tried });
+    // 多留一次机会：token 失效时可能靠「保存的密码自动重登」原地救回来，不需要换账号
+    for (let attempt = 0; attempt < Math.max(1, Math.min(4, accountCount)) + 1; attempt++) {
+      const account = pickAccount({ prefer, exclude: tried });
       if (!account) break;
       tried.add(account.id);
       const token = getToken(account.id);
@@ -155,6 +160,18 @@ export class DeepSeekHttp {
         lastError = error;
         this.lastError = error;
         if (error.kind === 'auth') {
+          // 先试「保存的密码自动重登」：成功后原地换 token，用同一个账号再跑一次
+          if (!reloginTried) {
+            reloginTried = true;
+            const r = await reloginAccount(account.id, { reason: 'chat' });
+            if (r.ok) {
+              this.log(`[chat] 账号 ${account.label} token 失效，已用保存的密码自动重新登录`);
+              tried.delete(account.id);
+              prefer = account.id;
+              continue;
+            }
+            if (r.needCode) this.log(`[chat] 账号 ${account.label} 自动重登需要邮箱验证码，请到设置里手动登录一次`);
+          }
           markAuthExpired(account.id);
           this.log(`[chat] 账号 ${account.label} 登录态失效，切换下一个`);
           continue;

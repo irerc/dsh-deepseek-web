@@ -20,6 +20,8 @@ export const DEFAULTS = {
   maxConcurrency: 4, // 全局并发上限
   perAccountConcurrency: 2,
   showToolNarration: false, // 调工具的轮次是否显示模型前面的说明文字（大号白字那种「我先看看 XX」）
+  // token 失效时，用保存的邮箱+密码自动重新登录（密码在本地加密保存，见 server/credentials.mjs）
+  autoRelogin: true,
   // 登录线路：auto 跟随浏览器；cn 国内（中文、手机号/微信登录）；global 海外（英文、邮箱/Google 登录，可直接注册国外账号）
   loginRegion: 'auto',
   loginHost: '', // 可选：登录页上游域名（默认 chat.deepseek.com，海外可填镜像域名）
@@ -101,6 +103,7 @@ export function saveConfig(patch) {
   clean.maxConcurrency = Math.max(1, Math.min(16, Number(clean.maxConcurrency) || DEFAULTS.maxConcurrency));
   clean.autoStart = clean.autoStart !== false;
   clean.showToolNarration = clean.showToolNarration === true;
+  clean.autoRelogin = clean.autoRelogin !== false;
   clean.loginRegion = ['auto', 'cn', 'global'].includes(clean.loginRegion) ? clean.loginRegion : 'auto';
   clean.loginHost = String(clean.loginHost || '').trim().slice(0, 120);
   clean.sectionOrder = normalizeSectionOrder(clean.sectionOrder);

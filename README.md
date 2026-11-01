@@ -7,6 +7,7 @@
 
 - **不需要浏览器**：Node 直连网页接口（PoW 用站点自带的 wasm 在本地算），因此在 Android/proot 容器里也能跑。
 - **多账号**：轮询 + 429 冷却 + 401 自动切换，设置界面可增删。
+- **保存密码、失效自动重登**：可选把账号密码加密存在本机，token 过期/被踢下线时自动重新登录，不用再手动贴 token。
 - **选模型即启动**：平时只监听一个极轻量的入口，首次调用网页版模型时才拉起引擎，空闲自动休眠。
 - **自带设置界面**：DSH 设置 →「DeepSeek 网页版」，可登录、管理账号、调参、看日志。
 - **即装即用**：包内自带 `cordis.patch.yml`，安装后由 DSH 自动应用 provider 配置。
@@ -24,7 +25,7 @@ git+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web.git
 **② 发行版压缩包（镜像，最快）**
 
 ```
-https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.33/dsh-deepseek-web-1.0.33.tgz
+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.34/dsh-deepseek-web-1.0.34.tgz
 ```
 
 **③ 仓库页（镜像浏览）**
@@ -36,7 +37,7 @@ https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web
 > 镜像不可用时，把上面链接里的 `https://gh-proxy.com/` 去掉即可直连 GitHub（官方速度可能较慢）：
 >
 > - 插件 spec：`https://github.com/irerc/dsh-deepseek-web`
-> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.33/dsh-deepseek-web-1.0.33.tgz`
+> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.34/dsh-deepseek-web-1.0.34.tgz`
 
 **不需要任何 API key**：插件自带 provider 配置与本地网关（`127.0.0.1:18081`），装好即用。
 
@@ -78,7 +79,7 @@ dsh-deepseek-web doctor
 
 - 每个账号的请求串行、带最小发送间隔（默认 1200ms，可调），失败会退避。
 - 429 → 该账号冷却 60s 起指数退避（上限 10min）并切下一个账号。
-- 401 → 标记「登录失效」，不会自动重登，需重新粘贴 token。
+- 401 → 若该账号保存了密码，先自动重新登录并把新 token 换到原账号（同一账号原地续跑，不打断对话）；没存密码或重登失败才标记「登录失效」。
 - 指定账号：模型名写 `deepseek-chat@工作号` 即可固定到某个账号。
 
 ## 设置项
@@ -89,6 +90,7 @@ dsh-deepseek-web doctor
 | idleStopMs | 600000 | 空闲多少毫秒后关停引擎 |
 | sendGapMs | 1200 | 同一账号两次请求的最小间隔 |
 | maxConcurrency | 4 | 全局并发上限（账号池总和） |
+| autoRelogin | true | token 失效时用保存的账号密码自动重新登录 |
 | sectionOrder | usage,engine,accounts,addAccount,log | 设置页卡片顺序，由最下方「页面设置」的 ↑/↓ 调整 |
 
 设置页卡片从上到下默认是：网页版用量 → 运行设置 → 账号管理 → 添加账号 → 引擎日志 → 页面设置（没有账号时「添加账号」会临时置顶）。
@@ -131,6 +133,16 @@ bin/cli.mjs           login/accounts/start/stop/status/doctor
 MIT License
 
 ## 更新日志
+
+### v1.0.34
+
+- **保存账号密码，token 失效自动重登**：用「邮箱 + 密码」登录时可以勾选「保存账号密码」，密码用本机密钥 AES-256-GCM 加密后存在 `state/accounts.json`（密钥单独放 `credentials.key`，权限 0600），接口永远不会把密码回传前端。
+  - **失效即重登**：对话中途撞到 401 时，先用保存的密码换一个新 token，然后**同一个账号原地重试**，不会打断对话、也不会白白浪费一次轮换。
+  - **点「检查」也会自动补登**：token 失效的账号不必手动操作；启动后与之后每 2 分钟还会扫一遍「失效且存了密码」的账号。
+  - **需要验证码的情况**：新设备首次密码登录可能被要求邮箱验证码，此时不会硬撞上游（避免反复发码），账号行会提示去手动「重新登录」一次；设备被站点记住后，后续就是全自动了。
+  - **给老账号补密码**：已有账号行多了「存密码」按钮，填一次邮箱+密码会立刻验证（验证通过才算存好）；也可以「改密码」「删除已存密码」。
+  - 账号列表里存了密码的账号会显示蓝色「已存密码」徽标，并多一个「重新登录」按钮。
+  - 运行设置里新增开关「token 失效时用保存的密码自动重新登录」（默认开）。
 
 ### v1.0.33
 

@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { STATE_DIR, ensureStateDir } from './config.mjs';
+import { encrypt, decrypt } from './credentials.mjs';
 
 const ACCOUNTS_FILE = path.join(STATE_DIR, 'accounts.json');
 const DEVICE_FILE = path.join(STATE_DIR, 'device.json');
@@ -53,6 +54,10 @@ export function publicAccount(a) {
     addedAt: a.addedAt || null,
     lastUsedAt: a.lastUsedAt || null,
     failures: a.failures || 0,
+    // 是否保存了账号密码（只给前端一个布尔值，密码本身永远不出后端）
+    hasPassword: Boolean(a.loginPassword),
+    lastReloginAt: a.lastReloginAt || null,
+    reloginBlocked: a.reloginBlocked === 'needCode' ? 'needCode' : '',
   };
 }
 
@@ -60,7 +65,7 @@ export function listAccounts() {
   return loadAccounts().accounts.map(publicAccount);
 }
 
-export function addAccount({ token, label, cookie = '', email = '', userId = '' }) {
+export function addAccount({ token, label, cookie = '', email = '', userId = '', password = '', loginEmail = '' }) {
   if (!token || typeof token !== 'string' || token.length < 20) throw new Error('token 无效');
   const doc = loadAccounts();
   const exists = doc.accounts.find((a) => a.token === token);
@@ -69,6 +74,12 @@ export function addAccount({ token, label, cookie = '', email = '', userId = '' 
     if (email) exists.email = email;
     if (userId) exists.userId = userId;
     if (label) exists.label = label;
+    if (password) {
+      exists.loginPassword = encrypt(password);
+      exists.loginEmail = loginEmail || email || exists.email || '';
+      exists.loginSavedAt = Date.now();
+      exists.reloginBlocked = '';
+    }
     save(doc);
     return publicAccount(exists);
   }
@@ -79,6 +90,10 @@ export function addAccount({ token, label, cookie = '', email = '', userId = '' 
     cookie: cookie || '',
     email: email || '',
     userId: userId || '',
+    // 保存的登录凭证（加密后存这里，见 credentials.mjs）
+    loginEmail: password ? loginEmail || email || '' : '',
+    loginPassword: password ? encrypt(password) : '',
+    loginSavedAt: password ? Date.now() : 0,
     addedAt: Date.now(),
     lastUsedAt: null,
     cooldownUntil: null,
@@ -172,4 +187,73 @@ export function markAuthExpired(id) {
 
 export function clearStatus(id) {
   return updateAccount(id, { status: 'ok', failures: 0, cooldownUntil: null });
+}
+
+// ---- 保存的登录凭证（token 失效时自动重新登录用）----
+
+/** 保存/更新某个账号的邮箱 + 密码（密码加密落盘，不回传前端） */
+export function setCredential(id, { email = '', password = '' } = {}) {
+  const doc = loadAccounts();
+  const account = doc.accounts.find((a) => a.id === id || a.label === id);
+  if (!account) return null;
+  if (password) account.loginPassword = encrypt(String(password));
+  if (email) account.loginEmail = String(email).trim();
+  if (!account.loginEmail && account.email) account.loginEmail = account.email;
+  account.loginSavedAt = Date.now();
+  account.reloginBlocked = '';
+  save(doc);
+  return publicAccount(account);
+}
+
+/** 读出可用的登录凭证 { email, password }；没保存过则返回 null */
+export function getCredential(id) {
+  const doc = loadAccounts();
+  const account = doc.accounts.find((a) => a.id === id || a.label === id);
+  if (!account || !account.loginPassword) return null;
+  const password = decrypt(account.loginPassword);
+  if (!password) return null;
+  return { email: account.loginEmail || account.email || '', password };
+}
+
+/** 忘记保存的密码 */
+export function clearCredential(id) {
+  const doc = loadAccounts();
+  const account = doc.accounts.find((a) => a.id === id || a.label === id);
+  if (!account) return null;
+  delete account.loginPassword;
+  delete account.loginEmail;
+  delete account.loginSavedAt;
+  account.reloginBlocked = '';
+  save(doc);
+  return publicAccount(account);
+}
+
+/** 重新登录成功后原地换 token（账号 id 不变，会话/用量都还对得上） */
+export function replaceToken(id, token, user = {}) {
+  const doc = loadAccounts();
+  const account = doc.accounts.find((a) => a.id === id || a.label === id);
+  if (!account) return null;
+  account.token = token;
+  account.status = 'ok';
+  account.failures = 0;
+  account.cooldownUntil = null;
+  account.lastReloginAt = Date.now();
+  account.reloginFailures = 0;
+  account.reloginBlocked = '';
+  if (user?.email) account.email = user.email;
+  if (user?.id) account.userId = user.id;
+  save(doc);
+  return publicAccount(account);
+}
+
+/** 自动重登失败：记下原因（needCode 时界面会提示去手动补验证码） */
+export function markReloginFailed(id, message = '', { needCode = false } = {}) {
+  const doc = loadAccounts();
+  const account = doc.accounts.find((a) => a.id === id || a.label === id);
+  if (!account) return null;
+  account.reloginFailures = (account.reloginFailures || 0) + 1;
+  account.lastReloginFailAt = Date.now();
+  account.reloginBlocked = needCode ? 'needCode' : String(message || '').slice(0, 200);
+  save(doc);
+  return publicAccount(account);
 }
