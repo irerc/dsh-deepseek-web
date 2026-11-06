@@ -32,7 +32,7 @@ git+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web.git
 **② 发行版压缩包（镜像，最快）**
 
 ```
-https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.50/dsh-deepseek-web-1.0.50.tgz
+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.51/dsh-deepseek-web-1.0.51.tgz
 ```
 
 **③ 仓库页（镜像浏览）**
@@ -44,7 +44,7 @@ https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web
 > 镜像不可用时，把上面链接里的 `https://gh-proxy.com/` 去掉即可直连 GitHub（官方速度可能较慢）：
 >
 > - 插件 spec：`https://github.com/irerc/dsh-deepseek-web`
-> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.50/dsh-deepseek-web-1.0.50.tgz`
+> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.51/dsh-deepseek-web-1.0.51.tgz`
 
 **不需要任何 API key**：插件自带 provider 配置与本地网关（`127.0.0.1:18081`），装好即用。
 
@@ -199,6 +199,19 @@ bin/cli.mjs           login/accounts/start/stop/status/doctor
 MIT License
 
 ## 更新日志
+
+### v1.0.51
+
+**主题：账号为什么容易被封，这版直接对着原因改 —— 并顺手把面板做得更像样。**
+
+- **同号并发强制 1（最重要的一条）**：以前 `perAccountConcurrency` 默认 2，同一账号允许两条请求同时在跑。参考实现实测「双窗口并发 6 分钟内被限流 1 天」—— 这是所有封号原因里最硬的一条，现在配置层强制为 1，不给调大的口子（全局并发仍可调，多账号照样能并行）。
+- **回放真实浏览器指纹头**：脚本直接发请求永远没有 `x-hif-dliq` / `x-hif-leim` / `x-client-*` 这些站点前端自己加的头，这是「机器味」最硬的证据之一。现在登录页会把页面自己发出的这些头抄一份，随 token 一起回传，插件白名单校验后存到账号上，PoW / 建会话 / 对话三个请求全部原样带上。白名单外的头（尤其 `authorization`）一律丢弃，不会复用也不会泄露。
+- **账号卡显示登录来源 / 登录时间 / 是否已采集指纹**，一眼看出哪个号还是「裸奔」状态（没采集指纹的号登录一次就自动补上）。
+- **「退出并登录其它」按钮**：把这个号从账号库移除（token / cookie / 保存的密码一起删）并立刻打开登录页去登另一个号，对应参考实现里「退出并登录其它账号」的语义，不用先删再找入口。
+- **界面统一升级**：卡片改圆角 + 轻投影 + 顶部微渐变，标题层级拉开，按钮/输入框加 hover 与焦点环（`focus` 时蓝色描边 + 光圈），代码片段改成圆角底色，整体留白收紧一点 —— 只在插件面板内生效，不碰 DSH 自己的样式。
+- 新增测试 `fingerprint-test.mjs`（17 项：指纹采集白名单、`authorization` 拒绝、超长值拒绝、落库与回放链路、同号并发强制 1）。
+
+> 升级说明：改了 `server/*` 与 `lib/*` —— 需**重启 DSH**；UI 部分刷新设置页即可。指纹要**重新登录一次**才会采集到（老账号显示「未采集指纹」）。
 
 ### v1.0.50
 

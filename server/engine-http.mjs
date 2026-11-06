@@ -3,7 +3,7 @@ import { BASE, UA, post, get, classify, UpstreamError, baseHeaders } from './htt
 import { solvePowHeader } from './pow.mjs';
 import { loadConfig } from './config.mjs';
 import { currentMode, modeLimits, gapFor, rateWindowFor, LONG_RUN_THRESHOLD, longRestFor, throttleBackoffMs } from './request-mode.mjs';
-import { pickAccount, markUsed, markCooldown, setCooldown, markAuthExpired, markMuted, listAccounts, getToken, getCookie } from './accounts.mjs';
+import { pickAccount, markUsed, markCooldown, setCooldown, markAuthExpired, markMuted, listAccounts, getToken, getCookie, getFingerprint } from './accounts.mjs';
 import { reloginAccount } from './relogin.mjs';
 import { createStreamParser } from './stream-parser.mjs';
 import { probeToken } from './token-check.mjs';
@@ -184,16 +184,16 @@ export class DeepSeekHttp {
   }
 
   /** 取 PoW 挑战并求解 */
-  async powHeader(token, targetPath, cookie = '') {
-    const res = await post('/api/v0/chat/create_pow_challenge', { target_path: targetPath }, { token, headers: cookie ? { cookie } : {} });
+  async powHeader(token, targetPath, cookie = '', fp = {}) {
+    const res = await post('/api/v0/chat/create_pow_challenge', { target_path: targetPath }, { token, headers: { ...(cookie ? { cookie } : {}), ...fp } });
     if (res.status !== 200 || res.json?.code !== 0) throw classify(res, '获取 PoW 挑战');
     const challenge = res.json?.data?.biz_data?.challenge;
     if (!challenge) throw new UpstreamError('PoW 挑战为空：' + res.text.slice(0, 200), { kind: 'upstream' });
     return solvePowHeader(challenge, targetPath);
   }
 
-  async createSession(token, cookie = '') {
-    const res = await post('/api/v0/chat_session/create', {}, { token, headers: cookie ? { cookie } : {} });
+  async createSession(token, cookie = '', fp = {}) {
+    const res = await post('/api/v0/chat_session/create', {}, { token, headers: { ...(cookie ? { cookie } : {}), ...fp } });
     if (res.status !== 200 || res.json?.code !== 0) throw classify(res, '创建会话');
     const id = res.json?.data?.biz_data?.chat_session?.id;
     if (!id) throw new UpstreamError('创建会话返回为空：' + res.text.slice(0, 200), { kind: 'upstream' });
@@ -223,7 +223,7 @@ export class DeepSeekHttp {
       try {
         await this.pace(account.id);
         const out = await this._runChat(account.id, () =>
-          this._chatOnce({ token, cookie: getCookie(account.id), prompt, thinking, sessionId, parentId, onDelta, idleMs }),
+          this._chatOnce({ token, cookie: getCookie(account.id), prompt, thinking, sessionId, parentId, onDelta, idleMs, accountId: account.id }),
         );
         markUsed(account.id);
         this._consecutive += 1;
@@ -310,10 +310,12 @@ export class DeepSeekHttp {
     });
   }
 
-  async _chatOnce({ token, cookie = '', prompt, thinking, sessionId, parentId, onDelta, idleMs }) {
+  async _chatOnce({ token, cookie = '', prompt, thinking, sessionId, parentId, onDelta, idleMs, accountId = '' }) {
     const targetPath = '/api/v0/chat/completion';
-    const pow = await this.powHeader(token, targetPath, cookie);
-    const sid = sessionId || (await this.createSession(token, cookie));
+    // 登录页采集到的真实浏览器指纹头：有就带上，让请求和真人页面发出的长得一样
+    const fp = accountId ? getFingerprint(accountId) : {};
+    const pow = await this.powHeader(token, targetPath, cookie, fp);
+    const sid = sessionId || (await this.createSession(token, cookie, fp));
 
     const ac = new AbortController();
     let last = Date.now();
@@ -327,7 +329,7 @@ export class DeepSeekHttp {
     try {
       const res = await fetch(BASE + targetPath, {
         method: 'POST',
-        headers: { ...baseHeaders(token), ...(cookie ? { cookie } : {}), 'x-ds-pow-response': pow },
+        headers: { ...baseHeaders(token), ...(cookie ? { cookie } : {}), ...fp, 'x-ds-pow-response': pow },
         body: JSON.stringify({
           chat_session_id: sid,
           parent_message_id: parentId || null,

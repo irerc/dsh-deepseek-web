@@ -20,7 +20,9 @@ export const DEFAULTS = {
   // 请求模式：raw 原始（提示词原样、不加额外说明）| safe 保险（提示词里插使用规范 + 更慢更保守）
   requestMode: 'raw',
   maxConcurrency: 4, // 全局并发上限
-  perAccountConcurrency: 2,
+  // 同一账号并发：强制 1。参考实现实测「双窗口并发 6 分钟内被限流 1 天」——
+  // 这是所有封号原因里最硬的一条，不给用户调大的口子。
+  perAccountConcurrency: 1,
   showToolNarration: false, // 调工具的轮次是否显示模型前面的说明文字（大号白字那种「我先看看 XX」）
   // token 失效时，用保存的邮箱+密码自动重新登录（密码在本地加密保存，见 server/credentials.mjs）
   autoRelogin: true,
@@ -118,6 +120,7 @@ export function saveConfig(patch) {
   clean.requestMode = ['raw', 'safe'].includes(clean.requestMode) ? clean.requestMode : 'raw';
   clean.idleStopMs = Math.max(60000, Math.min(24 * 3600 * 1000, Number(clean.idleStopMs) || DEFAULTS.idleStopMs));
   clean.maxConcurrency = Math.max(1, Math.min(16, Number(clean.maxConcurrency) || DEFAULTS.maxConcurrency));
+  clean.perAccountConcurrency = 1;
   clean.autoStart = clean.autoStart !== false;
   clean.showToolNarration = clean.showToolNarration === true;
   clean.autoRelogin = clean.autoRelogin !== false;

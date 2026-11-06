@@ -76,6 +76,9 @@ export function publicAccount(a) {
     banned: Boolean(a.banned),
     // 凭证来源 / 最近一次登录成功时间（界面「登录状态」用，参考 dsh-deepseek-web-login 的信息卡）
     loginSource: a.loginSource || '',
+    // 登录时从真实页面抄下来的请求头指纹（x-hif-* / x-client-*），引擎发请求时会原样带上
+    hasFingerprint: Boolean(a.fingerprint && Object.keys(a.fingerprint).length),
+    fingerprintAt: a.fingerprintAt || null,
     loginAt: a.loginAt || a.addedAt || null,
     active: false,
   };
@@ -199,6 +202,19 @@ export function pickAccount({ prefer = null, exclude = new Set() } = {}) {
   } catch {}
   rr = (rr + 1) % Math.max(1, usable.length);
   return usable[rr % usable.length];
+}
+
+/** 取某账号采集到的指纹头（没有就返回空对象） */
+export function getFingerprint(id) {
+  const account = loadAccounts().accounts.find((a) => a.id === id);
+  if (!account || !account.fingerprint || typeof account.fingerprint !== 'object') return {};
+  const out = {};
+  for (const [k, v] of Object.entries(account.fingerprint)) {
+    const key = String(k).toLowerCase();
+    if (!/^x-(hif|client|ds)-|^user-agent$/.test(key)) continue;
+    if (typeof v === 'string' && v.length <= 400) out[key] = v;
+  }
+  return out;
 }
 
 /** 改备注（只改名字，不影响任何凭证） */
