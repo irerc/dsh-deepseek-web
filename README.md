@@ -32,7 +32,7 @@ git+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web.git
 **② 发行版压缩包（镜像，最快）**
 
 ```
-https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.48/dsh-deepseek-web-1.0.48.tgz
+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.49/dsh-deepseek-web-1.0.49.tgz
 ```
 
 **③ 仓库页（镜像浏览）**
@@ -44,7 +44,7 @@ https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web
 > 镜像不可用时，把上面链接里的 `https://gh-proxy.com/` 去掉即可直连 GitHub（官方速度可能较慢）：
 >
 > - 插件 spec：`https://github.com/irerc/dsh-deepseek-web`
-> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.48/dsh-deepseek-web-1.0.48.tgz`
+> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.49/dsh-deepseek-web-1.0.49.tgz`
 
 **不需要任何 API key**：插件自带 provider 配置与本地网关（`127.0.0.1:18081`），装好即用。
 
@@ -199,6 +199,20 @@ bin/cli.mjs           login/accounts/start/stop/status/doctor
 MIT License
 
 ## 更新日志
+
+### v1.0.49
+
+**主题：照 `dsh-deepseek-web-login` 的账号库补齐登录侧功能（原有实现全部保留）。**
+
+- **「设为当前账号」**：账号卡上新增按钮，设完立即生效（不发任何请求），下一轮请求优先用它；它不可用（冷却 / 失效 / 禁言）时自动落回原来的轮询逻辑。账号名旁边有绿色「当前」标记。以前只有轮询，想固定用某个号只能靠 `defaultAccount`。
+- **改备注**：账号卡「改名」只改显示名，不动 token / cookie / 密码；导入备份时备注会一起带过来。
+- **导出 / 导入备份**：账号管理右上角新增「导出备份」「导入备份」。导出是带时间戳的 JSON（含 token / cookie / 备注 / 邮箱，**不含明文密码**），导入按 token 去重、已存在的只补 cookie 和邮箱，不会覆盖账号状态。换机器 / 重装 DSH 搬账号库就靠它。
+- **登录态探活间隔可配**：运行设置里新增输入框，默认 30 分钟（参考实现的 `probeIntervalMs`），0 = 关闭定时探活、只靠「全部体检」手动查；改完立刻按新间隔重排。启动后 15 秒那一次仍会跑。
+- **「失效 / 被限流时自动换号」开关**：默认**开着**，行为与之前完全一致（某个号失效或被限流，本轮自动换下一个）；关掉就明确报错停住，不再悄悄换号 —— 参考实现的建议是几分钟内频繁换号机器特征太强，容易被当成多开小号。
+- **登录状态信息更全**：账号记录里补上「登录来源」和「最近一次登录成功时间」；禁言/封禁那行显示**倒计时**（还剩 X 小时 Y 分），不用自己算。
+- 新增测试 `accounts-library-test.mjs`（34 项：当前账号优先与回落、改名、导出/导入 round-trip 与去重、非法条目跳过、探活间隔与自动换号配置的夹取、路由与界面入口）。
+
+> 升级说明：改了 `server/accounts.mjs`、`server/config.mjs`、`server/engine-http.mjs`、`lib/index.js` —— 需**重启 DSH**；`lib/client.js`（按钮 / 开关 / 倒计时）刷新设置页即可。账号库备份文件等同于账号本身（含 token），别外传。
 
 ### v1.0.48
 

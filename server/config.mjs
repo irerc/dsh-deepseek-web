@@ -32,6 +32,14 @@ export const DEFAULTS = {
   embedLogin: process.env.DS_EMBED_LOGIN !== '0',
   // 登录页登录成功时，把表单里的邮箱+密码加密保存到本机（下次自动填表 / token 失效自动重登用）
   saveLoginCredential: process.env.DS_SAVE_LOGIN_CREDENTIAL !== '0',
+  // 登录态主动探活间隔（毫秒），0 = 关闭。参考 dsh-deepseek-web-login 的 probeIntervalMs
+  probeIntervalMs: 30 * 60 * 1000,
+  // 当前账号：下一轮请求优先用它（账号库里的「设为当前账号」）
+  activeAccountId: '',
+  // 失效 / 被限流时自动换号。保持原来的行为（开着）；想学参考插件那样更保守可以关掉
+  autoSwitch: true,
+  // 定时换号间隔（分钟，0 = 关闭）
+  switchIntervalMin: 0,
   defaultAccount: null, // 不指定时按账号池轮询
   port: Number(process.env.DEEPSEEK_BRIDGE_PORT || 18081),
   // 设置页卡片显示顺序（由设置页最下方的「页面设置」修改）
@@ -113,6 +121,10 @@ export function saveConfig(patch) {
   clean.autoStart = clean.autoStart !== false;
   clean.showToolNarration = clean.showToolNarration === true;
   clean.autoRelogin = clean.autoRelogin !== false;
+  clean.autoSwitch = clean.autoSwitch === true;
+  clean.probeIntervalMs = Math.max(0, Math.min(24 * 3600 * 1000, Number(clean.probeIntervalMs) || 0));
+  clean.switchIntervalMin = Math.max(0, Math.min(1440, Number(clean.switchIntervalMin) || 0));
+  clean.activeAccountId = typeof clean.activeAccountId === 'string' ? clean.activeAccountId.trim().slice(0, 40) : '';
   clean.loginRegion = ['auto', 'cn', 'global'].includes(clean.loginRegion) ? clean.loginRegion : 'auto';
   clean.loginHost = String(clean.loginHost || '').trim().slice(0, 120);
   clean.embedLogin = clean.embedLogin !== false;

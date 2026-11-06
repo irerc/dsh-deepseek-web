@@ -2,7 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { STATE_DIR, ensureStateDir } from './config.mjs';
+import { STATE_DIR, ensureStateDir, loadConfig } from './config.mjs';
 import { encrypt, decrypt } from './credentials.mjs';
 import { deviceId } from './device.mjs';
 
@@ -74,11 +74,21 @@ export function publicAccount(a) {
     mutedUntil: a.mutedUntil && a.mutedUntil > now ? a.mutedUntil : null,
     muted: Boolean(a.mutedUntil && a.mutedUntil > now),
     banned: Boolean(a.banned),
+    // 凭证来源 / 最近一次登录成功时间（界面「登录状态」用，参考 dsh-deepseek-web-login 的信息卡）
+    loginSource: a.loginSource || '',
+    loginAt: a.loginAt || a.addedAt || null,
+    active: false,
   };
 }
 
 export function listAccounts() {
-  return loadAccounts().accounts.map(publicAccount);
+  let activeId = '';
+  try { activeId = loadConfig().activeAccountId || ''; } catch {}
+  return loadAccounts().accounts.map((a) => {
+    const out = publicAccount(a);
+    out.active = Boolean(activeId) && activeId === a.id;
+    return out;
+  });
 }
 
 export function addAccount({ token, label, cookie = '', email = '', userId = '', password = '', loginEmail = '' }) {
@@ -181,8 +191,88 @@ export function pickAccount({ prefer = null, exclude = new Set() } = {}) {
     const hit = usable.find((a) => a.id === prefer || a.label === prefer);
     if (hit) return hit;
   }
+  // 账号库里手动「设为当前账号」的号优先；不可用时自动落回轮询
+  try {
+    const activeId = loadConfig().activeAccountId || '';
+    const hit = activeId ? usable.find((a) => a.id === activeId) : null;
+    if (hit) return hit;
+  } catch {}
   rr = (rr + 1) % Math.max(1, usable.length);
   return usable[rr % usable.length];
+}
+
+/** 改备注（只改名字，不影响任何凭证） */
+export function renameAccount(id, label) {
+  const doc = loadAccounts();
+  const account = doc.accounts.find((a) => a.id === id);
+  if (!account) return null;
+  const clean = String(label || '').trim().slice(0, 40);
+  account.label = clean || account.label;
+  save(doc);
+  return publicAccount(account);
+}
+
+/**
+ * 导出账号库备份（等价于可完整登录的凭证，参考实现里的「导出备份」）。
+ * 不导出明文密码，只导 token / cookie / 备注 / 邮箱，换环境后仍能直接用。
+ */
+export function exportAccounts() {
+  const doc = loadAccounts();
+  return {
+    version: 1,
+    exportedAt: new Date().toISOString(),
+    accounts: doc.accounts.map((a) => ({
+      label: a.label,
+      token: a.token,
+      cookie: a.cookie || '',
+      email: a.email || '',
+      emailFull: a.emailFull || '',
+      userId: a.userId || '',
+      addedAt: a.addedAt || null,
+      loginSource: a.loginSource || '',
+    })),
+  };
+}
+
+/** 导入账号库备份：按 token 去重，已存在的只补 cookie/邮箱，不覆盖当前状态 */
+export function importAccounts(data) {
+  const list = Array.isArray(data) ? data : data && Array.isArray(data.accounts) ? data.accounts : [];
+  const doc = loadAccounts();
+  let added = 0;
+  let merged = 0;
+  for (const item of list) {
+    const token = typeof item?.token === 'string' ? item.token.trim() : '';
+    if (token.length < 20) continue;
+    const exists = doc.accounts.find((a) => a.token === token);
+    if (exists) {
+      if (item.cookie && !exists.cookie) exists.cookie = item.cookie;
+      if (item.emailFull && !isMaskedEmail(item.emailFull) && !exists.emailFull) exists.emailFull = item.emailFull;
+      merged += 1;
+      continue;
+    }
+    doc.accounts.push({
+      id: crypto.createHash('sha1').update(token).digest('hex').slice(0, 10),
+      label: String(item.label || '').trim() || '账号' + (doc.accounts.length + 1),
+      token,
+      cookie: item.cookie || '',
+      email: item.email || '',
+      emailFull: item.emailFull && !isMaskedEmail(item.emailFull) ? item.emailFull : '',
+      userId: item.userId || '',
+      loginEmail: '',
+      loginPassword: '',
+      loginSavedAt: 0,
+      addedAt: item.addedAt || Date.now(),
+      lastUsedAt: null,
+      cooldownUntil: null,
+      failures: 0,
+      status: 'ok',
+      disabled: false,
+      loginSource: '导入备份',
+    });
+    added += 1;
+  }
+  save(doc);
+  return { added, merged, total: doc.accounts.length };
 }
 
 export function markUsed(id) {

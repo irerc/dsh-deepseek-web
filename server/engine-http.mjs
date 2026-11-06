@@ -267,6 +267,14 @@ export class DeepSeekHttp {
             if (r.needCode) this.log(`[chat] 账号 ${account.label} 自动重登需要邮箱验证码，请到设置里手动登录一次`);
           }
           markAuthExpired(account.id);
+          // 自动换号可以关（学 dsh-deepseek-web-login：几分钟内频繁换号是极强的机器特征）。
+          // 关掉时明确报错，而不是悄悄拿别的号接着跑。
+          if (!loadConfig().autoSwitch) {
+            throw new UpstreamError('账号 ' + who + ' 登录态已失效；自动换号已关闭，请重新登录或在设置里打开「失效自动换号」', {
+              kind: 'auth',
+              code: 'AUTH_EXPIRED_NO_SWITCH',
+            });
+          }
           this.log(`[chat] 账号 ${who} 登录态失效，切换下一个`);
           continue;
         }
@@ -276,6 +284,12 @@ export class DeepSeekHttp {
           const backoff = noteThrottled();
           const out = setCooldown(account.id, backoff);
           this.log(`[chat] 账号 ${account.label} 被限流，冷却 ${Math.round((out?.wait || backoff) / 1000)}s（连续第 ${throttleStreak} 次）`);
+          if (!loadConfig().autoSwitch) {
+            throw new UpstreamError('账号 ' + account.label + ' 被站点限流，冷却 ' + Math.round((out?.wait || backoff) / 1000) + 's；自动换号已关闭', {
+              kind: 'rate',
+              code: 'RATE_LIMITED_NO_SWITCH',
+            });
+          }
           continue;
         }
         if (error.kind === 'mute' || error.kind === 'banned') {
