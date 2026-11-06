@@ -201,6 +201,17 @@ export function markCooldown(id, ms) {
   return { account: publicAccount(account), wait };
 }
 
+/** 精确设定冷却时间（限流退避已经算好具体毫秒时用，不再按失败次数翻倍） */
+export function setCooldown(id, ms) {
+  const doc = loadAccounts();
+  const account = doc.accounts.find((a) => a.id === id);
+  if (!account) return null;
+  account.failures = (account.failures || 0) + 1;
+  account.cooldownUntil = Date.now() + Math.max(0, Math.round(ms));
+  save(doc);
+  return { account: publicAccount(account), wait: Math.max(0, Math.round(ms)) };
+}
+
 export function markAuthExpired(id) {
   const doc = loadAccounts();
   const account = doc.accounts.find((a) => a.id === id);

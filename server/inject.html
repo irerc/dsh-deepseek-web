@@ -1,12 +1,12 @@
 <script>
 /*
  * 注入到登录代理页面的脚本（独立文件，避免在模板字符串里写正则时反斜杠被吃掉）。
- * 占位符：__DSH_REPORT__ 收 token 的插件地址；__DSW_REGION__ 线路标签。
+ * 回传地址固定为同源的 /__dsweb/report，由代理转发给插件（避免跨域预检失败）；__DSW_REGION__ 线路标签。
  * 目标：用户在这个页面里怎么登录都行（密码 / 验证码 / 已登录状态），
  *       脚本把 token 从「网络层 → localStorage → Cookie → IndexedDB」四个来源里捞出来回传。
  */
 (function () {
-  var REPORT = '__DSH_REPORT__';
+  var REPORT = '/__dsweb/report';
   var REGION = '__DSW_REGION__';
   var sent = {};   // token -> true 表示已经成功保存
   var tries = {};  // token -> 尝试次数，避免同一个失效 token 反复重试
@@ -84,6 +84,16 @@
     return m ? m[1] : '';
   }
 
+  function pageCookieText() {
+    try {
+      return String(document.cookie || '')
+        .split(';')
+        .map(function (x) { return x.trim(); })
+        .filter(function (x) { return x && x.indexOf('dsweb_sid=') !== 0; })
+        .join('; ');
+    } catch (e) { return ''; }
+  }
+
   function report(token, source) {
     if (!looksToken(token) || sent[token]) return;
     if ((tries[token] || 0) >= 3) return;
@@ -92,7 +102,18 @@
     fetch(REPORT, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ token: token, label: '浏览器登录', sid: sidCookie(), source: source, email: loginEmail || domEmail(), password: loginPassword || '', accountId: window.__dswebAccountId || '' })
+      body: JSON.stringify({
+        token: token,
+        label: '浏览器登录',
+        sid: sidCookie(),
+        source: source,
+        email: loginEmail || domEmail(),
+        password: loginPassword || '',
+        accountId: window.__dswebAccountId || '',
+        // 兜底：把页面自己的 cookie 一起带回去。服务端读 cookie 罐（按 sid 找 jar 文件）偶尔会读不到
+        // ——电脑端全新安装后「登录成功但没有 cookie」就是这个原因；页面里的 cookie 一定是准的。
+        cookieText: pageCookieText()
+      })
     }).then(function (r) { return r.json(); }).then(function (d) {
       if (d && d.ok) {
         tip('已保存到 DSH 插件 ✓（来源 ' + source + '），可以关闭本页了' + (loginPassword ? '；账号密码也已加密保存在本机，下次自动填写' : ''));

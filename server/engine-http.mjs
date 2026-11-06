@@ -2,8 +2,8 @@
 import { BASE, UA, post, get, classify, UpstreamError, baseHeaders } from './http.mjs';
 import { solvePowHeader } from './pow.mjs';
 import { loadConfig } from './config.mjs';
-import { currentMode, modeLimits, gapFor } from './request-mode.mjs';
-import { pickAccount, markUsed, markCooldown, markAuthExpired, markMuted, listAccounts, getToken, getCookie } from './accounts.mjs';
+import { currentMode, modeLimits, gapFor, rateWindowFor, LONG_RUN_THRESHOLD, longRestFor, throttleBackoffMs } from './request-mode.mjs';
+import { pickAccount, markUsed, markCooldown, setCooldown, markAuthExpired, markMuted, listAccounts, getToken, getCookie } from './accounts.mjs';
 import { reloginAccount } from './relogin.mjs';
 import { createStreamParser } from './stream-parser.mjs';
 import { probeToken } from './token-check.mjs';
@@ -27,6 +27,28 @@ export function muteErrorFrom(text) {
   return { banned, untilMs };
 }
 
+/** 从 SSE 块里认出「被限流」：业务码 40029 或站点那句「操作过于频繁」 */
+export function rateLimitErrorFrom(text) {
+  const t = String(text || '');
+  if (/"code"\s*:\s*(?:40029|429)\b|"biz_code"\s*:\s*(?:40029|429)\b/.test(t)) return true;
+  // 只认「错误信封」里的文案：模型正文里出现「操作频繁」这种词也很正常，不能当成限流
+  if (!/"code"\s*:\s*[1-9]/.test(t)) return false;
+  return /过于频繁|太频繁|操作频繁|too\s+many\s+requests|rate\s*limit|稍后重试/i.test(t);
+}
+
+/**
+ * 限流计数：连续被限流就退避更久（40s → 80s → 90s 封顶 + 抖动），
+ * 5 分钟内没再被限流就清零。参考 dsh-deepseek-web-login 的 throttleStreak。
+ */
+let throttleStreak = 0;
+let lastThrottleAt = 0;
+export function noteThrottled(now = Date.now()) {
+  if (now - lastThrottleAt > 5 * 60 * 1000) throttleStreak = 0;
+  throttleStreak += 1;
+  lastThrottleAt = now;
+  return throttleBackoffMs(throttleStreak);
+}
+
 export class DeepSeekHttp {
   constructor(log = () => {}) {
     this.log = log;
@@ -36,6 +58,10 @@ export class DeepSeekHttp {
     this._accActive = new Map();
     this.closed = false;
     this.lastError = null;
+    // 滚动窗口 + 连续请求计数：别让同一出口 IP 短时间高频打同一站点
+    this._recentStarts = [];
+    this._consecutive = 0;
+    this._lastDoneAt = 0;
   }
 
   get pending() {
@@ -120,15 +146,41 @@ export class DeepSeekHttp {
     }
   }
 
-  /** 等一个账号的发送间隔，保证不紧贴着打上游 */
+  /**
+   * 等一个账号的发送间隔，保证不紧贴着打上游。
+   * 三层节奏（从轻到重）：随机间隔 → 滚动窗口限速 → 连续多轮后长休。
+   */
   async pace(accountId) {
     const { sendGapMs } = loadConfig();
+    const mode = currentMode();
     // 保险模式至少间隔 4 秒、抖动更长；原始模式按配置走
-    const gap = gapFor(sendGapMs, currentMode());
+    const gap = gapFor(sendGapMs, mode);
     const last = lastSentAt.get(accountId) || 0;
-    const wait = last + gap - Date.now();
+    let wait = last + gap - Date.now();
+    // 一、连续跑了十几轮：插一次长休。真人不会一口气几十条，机器味也是账号级限流的诱因
+    if (this._consecutive >= LONG_RUN_THRESHOLD && this._lastDoneAt > 0) {
+      const rest = longRestFor();
+      const ms = Math.round(rest.min + Math.random() * (rest.max - rest.min));
+      wait = Math.max(wait, this._lastDoneAt + ms - Date.now());
+      this.log(`[pace] 已连续 ${this._consecutive} 轮，长休 ${Math.round(ms / 1000)}s 再发（防账号级限流）`);
+      this._consecutive = 0;
+    }
+    // 二、滚动窗口：十分钟内最多 N 次，超了就等最老那次滑出去
+    const win = rateWindowFor(mode);
+    const now = Date.now();
+    this._recentStarts = this._recentStarts.filter((t) => now - t < win.windowMs);
+    if (this._recentStarts.length >= win.max) {
+      const freeAt = this._recentStarts[this._recentStarts.length - win.max] + win.windowMs;
+      const ms = freeAt - now;
+      if (ms > wait) {
+        this.log(`[pace] 近 ${Math.round(win.windowMs / 60000)} 分钟已发 ${this._recentStarts.length} 次（上限 ${win.max}），等 ${Math.round(ms / 1000)}s 再发（滚动窗口限速）`);
+        wait = ms;
+      }
+    }
     if (wait > 0) await sleep(wait);
-    lastSentAt.set(accountId, Date.now());
+    const at = Date.now();
+    lastSentAt.set(accountId, at);
+    this._recentStarts.push(at);
   }
 
   /** 取 PoW 挑战并求解 */
@@ -174,6 +226,8 @@ export class DeepSeekHttp {
           this._chatOnce({ token, cookie: getCookie(account.id), prompt, thinking, sessionId, parentId, onDelta, idleMs }),
         );
         markUsed(account.id);
+        this._consecutive += 1;
+        this._lastDoneAt = Date.now();
         return { ...out, accountId: account.id };
       } catch (error) {
         lastError = error;
@@ -217,8 +271,11 @@ export class DeepSeekHttp {
           continue;
         }
         if (error.kind === 'rate') {
-          const out = markCooldown(account.id, 60000);
-          this.log(`[chat] 账号 ${account.label} 被限流，冷却 ${Math.round((out?.wait || 0) / 1000)}s`);
+          // 退避按「连续被限流次数」翻倍（40s → 80s → 90s 封顶 + 抖动）：限流是「发太快了」的反馈，
+          // 同号冷却完立刻再撞只会把账号推给站点风控。冷却结束后上层重试会换下一个账号。
+          const backoff = noteThrottled();
+          const out = setCooldown(account.id, backoff);
+          this.log(`[chat] 账号 ${account.label} 被限流，冷却 ${Math.round((out?.wait || backoff) / 1000)}s（连续第 ${throttleStreak} 次）`);
           continue;
         }
         if (error.kind === 'mute' || error.kind === 'banned') {
@@ -286,6 +343,9 @@ export class DeepSeekHttp {
         while ((idx = buf.indexOf('\n\n')) >= 0) {
           const block = buf.slice(0, idx);
           buf = buf.slice(idx + 2);
+          if (rateLimitErrorFrom(block)) {
+            throw new UpstreamError('账号被站点限流：' + String(block).slice(0, 160), { kind: 'rate', code: '40029' });
+          }
           const muted = muteErrorFrom(block);
           if (muted) {
             throw new UpstreamError(muted.banned ? '账号已被站点停用' : '账号被站点禁言', {

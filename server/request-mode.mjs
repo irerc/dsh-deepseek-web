@@ -59,7 +59,33 @@ export function gapFor(baseMs, mode) {
   const base = Math.max(0, Number(baseMs) || 0);
   const gap = Math.max(base, safe ? 4000 : 0);
   const jitter = safe ? 1 + Math.random() * 0.6 : 0.8 + Math.random() * 0.4;
+  // 只做「间隔抖动」，不额外插随机长停顿：长尾节奏交给滚动窗口限速和连续轮次长休
+  // （那两处是真正对付账号级限流的地方，也不会让每次回复莫名多等几秒）。
   return Math.round(gap * jitter);
+}
+
+/**
+ * 滚动窗口限速（参考 dsh-deepseek-web-login 的做法）：
+ * 小间隔洗不掉「十分钟发了二十次」这种计数，账号级静默限流多半就是撞在这上面。
+ * 超出窗口就等下一次空位，宁可用户多等几秒，也别把账号打进冷却。
+ */
+export function rateWindowFor(mode) {
+  return isSafe(mode) ? { windowMs: 10 * 60 * 1000, max: 8 } : { windowMs: 10 * 60 * 1000, max: 16 };
+}
+
+/** 连续请求多少轮后插一次长休；长休区间（毫秒） */
+export const LONG_RUN_THRESHOLD = 10;
+export function longRestFor() {
+  return { min: 25000, max: 70000 };
+}
+
+/**
+ * 限流退避：基数 40s、每次翻倍、封顶 90s，另加 0~30% 抖动。
+ * 同号被限后立刻重试只会再撞一次，所以这里宁可等久一点。
+ */
+export function throttleBackoffMs(streak) {
+  const base = Math.min(40000 * Math.pow(2, Math.max(0, streak - 1)), 90000);
+  return Math.round(base * (1 + Math.random() * 0.3));
 }
 
 /** 保险模式要注入的那条 system 消息（原始模式不注入） */

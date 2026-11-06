@@ -150,6 +150,23 @@ function writeAsset(url, buf) {
     fs.writeFileSync(assetPath(url), buf);
   } catch {}
 }
+/** 上游彻底失败（连不上 / 一直 202）时给一张能看的页面，而不是空白 iframe 或一行纯文本 */
+function retryPage(reason) {
+  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>登录页没加载出来</title><style>body{background:#111;color:#eee;font:14px/1.7 system-ui,sans-serif;padding:24px;max-width:640px;margin:0 auto}
+h2{font-size:17px}code{background:#222;padding:1px 5px;border-radius:4px}a{color:#6cf}p{color:#bbb}ul{padding-left:20px}</style></head><body>
+<h2>登录页没加载出来</h2>
+<p>本机代理连站点这一步失败了：<code>${String(reason || '未知原因').slice(0, 160)}</code></p>
+<p>常见原因和办法：</p>
+<ul>
+<li>网络抖动 / 代理（VPN）不稳定 → 点下面「重试」；</li>
+<li>站点风控（WAF 人机验证）间歇性拦截 → 等 20 秒再点「重试」，插件已经会自动重试几次；</li>
+<li>还是一直这样 → 关掉这个内嵌窗口，用<b>「用系统浏览器打开」</b>（真实浏览器里站点不会为难你），登录成功后 token 一样会自动回填。</li>
+</ul>
+<p><a href="javascript:location.reload()" style="display:inline-block;margin-top:8px;padding:8px 14px;border:1px solid #4a7;border-radius:8px;text-decoration:none;color:#9e9">重试</a></p>
+</body></html>`;
+}
+
 function challengePage() {
   return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>站点风控拦截</title><style>body{background:#111;color:#eee;font:14px/1.7 system-ui,sans-serif;padding:24px;max-width:640px;margin:0 auto}
@@ -166,11 +183,39 @@ h2{font-size:17px}code{background:#222;padding:1px 5px;border-radius:4px}a{color
 </body></html>`;
 }
 
+// 到站点的连接复用：每次页面/资源都重新握手，在移动网络 + 代理环境里最容易出现
+// 「Client network socket disconnected before secure TLS connection was established」，
+// 表现出来就是内嵌登录框一片白。keepAlive 能把这类失败压下去一大半。
+const upstreamAgent = new https.Agent({ keepAlive: true, keepAliveMsecs: 30000, maxSockets: 16, maxFreeSockets: 8 });
+
+// 登录页 HTML 缓存：WAF 是间歇性的（同一分钟里 200 / 202 交替），
+// 只要成功拿到过一次完整页面，接下来 30 分钟即使上游又被 202 挡住，也能把页面发出来，
+// 不至于让用户对着空白 iframe 发呆。
+const PAGE_TTL_MS = 30 * 60 * 1000;
+function pageKey(target) {
+  return 'page::' + target;
+}
+function readPage(target) {
+  try {
+    const file = assetPath(pageKey(target));
+    const st = fs.statSync(file);
+    if (Date.now() - st.mtimeMs > PAGE_TTL_MS) return null;
+    return fs.readFileSync(file);
+  } catch {
+    return null;
+  }
+}
+function writePage(target, buf) {
+  try {
+    writeAsset(pageKey(target), buf);
+  } catch {}
+}
+
 function fetchUpstream(target, method, headers, body, attempts = 3, timeoutMs = 12000) {
   let lastError = null;
   const run = (n) =>
     new Promise((resolve) => {
-      const req = https.request(target, { method, headers }, (up) => {
+      const req = https.request(target, { method, headers, agent: upstreamAgent }, (up) => {
         const chunks = [];
         up.on('data', (c) => chunks.push(c));
         up.on('end', () => resolve({ up, buf: Buffer.concat(chunks) }));
@@ -212,6 +257,58 @@ export function startLoginProxy({ port = 18090, reportUrl }) {
             : { ok: false, message: '自动登录票据已过期，请回到插件设置页再点一次「浏览器登录」' },
         ),
       );
+      return;
+    }
+    // ---- token 回传：页面 POST 到同源的 /__dsweb/report，这里再转发给插件 ----
+    // 以前页面直接 POST 到 http://127.0.0.1:38445/...（跨 origin），浏览器会先发 OPTIONS 预检；
+    // 预检一旦被网关/系统浏览器拦掉，页面就只看到「网络失败 … Failed to fetch」，
+    // token 明明抓到了却存不进去 —— 内嵌登录「用不了」多半就是这一步。
+    // 改成同源转发后不再有跨域预检，也不依赖网关的 CORS 配置。
+    if (req.method === 'POST' && req.url.startsWith('/__dsweb/report')) {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      const payload = Buffer.concat(chunks);
+      const reply = (status, text, type) => {
+        res.writeHead(status, { 'content-type': type || 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+        res.end(text);
+      };
+      let target = null;
+      try { target = new URL(reportUrl); } catch {}
+      if (!target) return reply(200, '{"ok":false,"message":"插件没配置回传地址"}');
+      const bodyText = payload.toString('utf8');
+      let brief = '';
+      try { brief = bodyText.slice(0, 120).replace(/\s+/g, ' '); } catch {}
+      logLine('REPORT ' + payload.length + 'B -> ' + target.origin + target.pathname + ' ' + brief);
+      const upstream = http.request(
+        {
+          host: target.hostname,
+          port: target.port || 80,
+          path: target.pathname + target.search,
+          method: 'POST',
+          headers: { 'content-type': 'application/json; charset=utf-8', 'content-length': payload.length, host: target.host },
+          timeout: 15000,
+        },
+        (up) => {
+          const out = [];
+          up.on('data', (c) => out.push(c));
+          up.on('end', () => {
+            const text = Buffer.concat(out).toString('utf8');
+            logLine('REPORT <- ' + up.statusCode + ' ' + text.slice(0, 200));
+            reply(up.statusCode || 200, text || '{"ok":false,"message":"插件没有返回内容"}');
+          });
+        },
+      );
+      upstream.on('timeout', () => {
+        logLine('REPORT TIMEOUT ' + target.origin);
+        upstream.destroy();
+      });
+      upstream.on('error', (error) => {
+        logLine('REPORT ERROR ' + error.message);
+        try {
+          reply(200, JSON.stringify({ ok: false, message: '回传到插件失败：' + error.message + '（DSH 是否已关闭？）' }));
+        } catch {}
+      });
+      upstream.end(payload);
       return;
     }
     if (req.method === 'POST' && req.url.startsWith('/__dsweb/done')) {
@@ -339,10 +436,19 @@ export function startLoginProxy({ port = 18090, reportUrl }) {
         up.on('end', () => {
           const wafChallenge = up.statusCode === 202 || Boolean(up.headers['x-amzn-waf-action']);
           if (wafChallenge) {
-            // 站点风控要求「人机验证」：等一两秒重试，通常第二次就放行了。
-            if (attempt < 2) {
-              logLine('WAF_CHALLENGE(' + attempt + ') ' + req.url + ' 稍后重试');
-              setTimeout(() => send(attempt + 1), 1500);
+            // 站点风控要求「人机验证」：等一会儿重试。实测同一分钟内 200/202 会交替出现，
+            // 多试几次（1.2s / 2.5s）比只试两次成功率高得多。
+            if (attempt < 3) {
+              logLine('WAF_CHALLENGE(' + attempt + '/3) ' + req.url + ' 稍后重试');
+              setTimeout(() => send(attempt + 1), attempt === 1 ? 1200 : 2500);
+              return;
+            }
+            // 上游一直拦：优先把之前成功抓到过的整页发出去（页面本身不依赖上游实时响应）
+            const cachedPage = readPage(target);
+            if (cachedPage) {
+              logLine('PAGE-CACHE-HIT ' + req.url);
+              res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'x-dsweb-cache': 'hit' });
+              res.end(cachedPage);
               return;
             }
             logLine('WAF_BLOCKED ' + req.url);
@@ -363,8 +469,7 @@ export function startLoginProxy({ port = 18090, reportUrl }) {
           });
           const regionLabel = (loadConfig().loginRegion === 'global' ? '海外' : loadConfig().loginRegion === 'cn' ? '国内' : '自动') + '·' + siteHost();
           const DEVICE_ID = deviceId();
-          const snippet = INJECT.split('__DSH_REPORT__')
-            .join(reportUrl)
+          const snippet = INJECT
             .split('__DSW_REGION__')
             .join(regionLabel)
             .split('__DSW_DEVICE_ID__')
@@ -378,6 +483,8 @@ export function startLoginProxy({ port = 18090, reportUrl }) {
             ');}catch(e){}})();</script>';
           html = /<head[^>]*>/i.test(html) ? html.replace(/<head([^>]*)>/i, '<head$1>' + headSnippet) : headSnippet + html;
           html = html.includes('</body>') ? html.replace('</body>', snippet + '</body>') : html + snippet;
+          // 注入之后整页只有一个版本，缓存它：下次被 WAF 挡时可以直接发这一份
+          writePage(target, Buffer.from(html, 'utf8'));
           res.writeHead(up.statusCode || 200, { ...headers, 'content-type': 'text/html; charset=utf-8' });
           res.end(html);
         });
@@ -388,17 +495,25 @@ export function startLoginProxy({ port = 18090, reportUrl }) {
       upstream.destroy(new Error('timeout'));
     });
     upstream.on('error', (error) => {
-      // 站点偶尔会抽风（连接被掐断/超时）。GET 请求重试最多 3 次；POST 不重试，避免重复提交登录。
-      const canRetry = req.method === 'GET' && attempt < 2 && !res.headersSent;
+      // 站点偶尔会抽风（连接被掐断/超时，移动网络下很常见）。GET 请求多试几次；POST 不重试，避免重复提交登录。
+      const canRetry = req.method === 'GET' && attempt < 3 && !res.headersSent;
       if (canRetry) {
         logLine('RETRY(' + attempt + '/3) ' + req.url + ' ' + error.message);
-        setTimeout(() => send(attempt + 1), 300);
+        setTimeout(() => send(attempt + 1), attempt === 1 ? 300 : 900);
         return;
       }
       logLine('ERROR ' + (req.method || 'GET') + ' ' + req.url + ' ' + error.message + (process.env.DSW_PROXY_DEBUG ? ' headers=' + JSON.stringify(headers) : ''));
       if (res.headersSent) return res.end();
-      res.writeHead(502, { 'content-type': 'text/plain; charset=utf-8' });
-      res.end('代理失败：' + error.message);
+      const cachedPage = req.method === 'GET' ? readPage(target) : null;
+      if (cachedPage) {
+        logLine('PAGE-CACHE-HIT ' + req.url);
+        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'x-dsweb-cache': 'hit' });
+        res.end(cachedPage);
+        return;
+      }
+      // 别再给空白 iframe / 一行纯文本：给一张能看懂、能重试的页面
+      res.writeHead(502, { 'content-type': 'text/html; charset=utf-8' });
+      res.end(retryPage(error.message));
     });
     upstream.end(body.length ? body : undefined);
     };

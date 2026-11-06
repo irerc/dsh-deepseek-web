@@ -32,7 +32,7 @@ git+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web.git
 **② 发行版压缩包（镜像，最快）**
 
 ```
-https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.47/dsh-deepseek-web-1.0.47.tgz
+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.48/dsh-deepseek-web-1.0.48.tgz
 ```
 
 **③ 仓库页（镜像浏览）**
@@ -44,7 +44,7 @@ https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web
 > 镜像不可用时，把上面链接里的 `https://gh-proxy.com/` 去掉即可直连 GitHub（官方速度可能较慢）：
 >
 > - 插件 spec：`https://github.com/irerc/dsh-deepseek-web`
-> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.47/dsh-deepseek-web-1.0.47.tgz`
+> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.48/dsh-deepseek-web-1.0.48.tgz`
 
 **不需要任何 API key**：插件自带 provider 配置与本地网关（`127.0.0.1:18081`），装好即用。
 
@@ -199,6 +199,25 @@ bin/cli.mjs           login/accounts/start/stop/status/doctor
 MIT License
 
 ## 更新日志
+
+### v1.0.48
+
+**主题：内嵌登录「白屏 + 登录成功却没存下来」修到底，顺手把节奏改成不容易被限流的。**
+
+- **修内嵌登录存不进去（关键）**：登录页一直是在本机独立 origin（`127.0.0.1:18090`）里打开的，但 token 回传却直接 POST 到 DSH 的 `127.0.0.1:38445` —— 跨域预检一旦被浏览器/系统 WebView 拦掉，页面只显示一句「网络失败 … Failed to fetch」，token 明明抓到了却没进账号池。现在改成本机代理上的同源接口 `/__dsweb/report`，由代理在服务端转发给插件：没有跨域、没有预检，网关挂了也会回一句能读的 JSON 错误而不是白屏。
+- **登录代理加固**：上游 TLS 断开、WAF 返回 202 挑战、偶发 5xx 都不再直接把白页丢给用户 —— 页面请求最多重试 3 次（1.2s / 2.5s），仍失败就发 30 分钟内缓存过的整页 HTML，最后才是一张说人话的错误页（含「重新加载 / 用系统浏览器打开」的指引）；静态资源保留磁盘缓存兜底。
+- **不再每次点「内嵌登录」都重启代理**：以前每点一次都会关掉旧代理再起新的，正在加载的 iframe 直接被掐断（表现就是白屏），页面缓存和 keep-alive 连接也一起丢掉。现在只在 `server/proxy.mjs` 真的改过时才重载，并在启动后预热一次登录页，把整页缓存和连接先建好。
+- **cookie 兜底**：登录页回传 token 时一并把页面自己的 cookie 带回来（排除插件自己的 `dsweb_sid`）。服务端按 `dsweb_sid` 读本地 cookie 罐偶尔会读不到 —— 电脑端全新安装后「登录成功但没有 cookie」基本就是这条路径。
+- **异常账号的两个出口更明确**：登录失效 / 被禁言 / 被封禁 / 设备风控拦住的账号，卡片上会直接说明「点『存账号密码』填一次完整邮箱+密码 → 之后『内嵌登录』自动填表、失效也能自动重登；不想存就点『内嵌登录』自己输一次」；存过密码的账号仍然有「复制账号密码」（复制到剪贴板去 Chrome 手动登）。没存密码的异常账号按钮文案也从「存密码」改成「存账号密码」，密码输入框提示写明用途。
+- **防限流（参考 `dsh-deepseek-web-login` 的做法）**：
+  - **滚动窗口限速**：任意 10 分钟内最多 16 次（保险模式 8 次），超了就等最老那次滑出窗口 —— 小间隔洗不掉「十分钟发二十次」这种计数，账号级静默限流多半撞在这上面。
+  - **连续轮次长休**：连着跑满 10 轮插一次 25~70 秒的长休，真人不会一口气几十条。
+  - **认出站点自己的限流**：业务码 `40029`、HTTP 429、错误信封里的「操作过于频繁 / Too Many Requests / rate limit」现在都归为「被限流」（以前被当成普通上游错误直接抛，既不冷却也不退避，紧接着再发只会再撞一次）。
+  - **退避改成 40s 起翻倍、90s 封顶、+0~30% 抖动**（连续被限流会翻倍，5 分钟内没再被限流就清零），冷却用的是算好的具体时长，不再按失败次数二次翻倍。
+- **界面**：内嵌窗口下方加了一句白屏说明（先「重新加载」，再不行「用系统浏览器打开」，token 一样回填）。
+- 新增测试：`ratelimit-test.mjs`（21 项：限流分类、SSE 限流识别、间隔抖动、滚动窗口、长休、退避曲线）与 `proxy-report-test.mjs`（8 项：同源回传转发、cookie 字段透传、插件 400 原样透传、网关挂掉时的可读错误）。
+
+> 升级说明：这次改了 `server/proxy.mjs`、`server/inject.html`、`server/engine-http.mjs`、`server/http.mjs`、`server/request-mode.mjs`、`server/accounts.mjs`、`lib/index.js` —— 需要**重启 DSH** 才会生效；`lib/client.js`（白屏说明、存账号密码文案）刷新设置页即可。
 
 ### v1.0.47
 

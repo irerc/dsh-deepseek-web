@@ -92,8 +92,10 @@ export function classify(result, what = '上游') {
   if (result.status === 401 || code === 40003 || code === 40002) {
     return new UpstreamError(`${what}登录态失效：${msg}`, { status: result.status, code: String(code), kind: 'auth' });
   }
-  if (result.status === 429) {
-    return new UpstreamError(`${what}被限流：${msg}`, { status: 429, kind: 'rate' });
+  // 网页版限流不走 HTTP 429：站点用业务码 40029（按 IP 限流）或「操作过于频繁」这类文案回 200。
+  // 以前这些都被当成普通 upstream 错误直接抛给上层，既没冷却也没退避，紧接着再发只会再撞一次。
+  if (result.status === 429 || code === 40029 || /过于频繁|太频繁|操作频繁|too\s+many\s+requests|rate\s*limit|稍后重试/i.test(msg)) {
+    return new UpstreamError(`${what}被限流：${msg}`, { status: result.status || 429, code: String(code || ''), kind: 'rate' });
   }
   if (result.status >= 500) {
     return new UpstreamError(`${what}服务异常（${result.status}）：${msg}`, { status: result.status, kind: 'upstream' });
