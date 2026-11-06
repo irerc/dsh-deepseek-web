@@ -35,6 +35,116 @@ export function readCookiesBySid(sid) {
   return cookieHeader(readJar(sid));
 }
 
+/* --------------------------- 登录会话（jar） --------------------------- *
+ * 每次登录浏览器都会拿到一个 dsweb_sid，服务端 cookie 存在 jar-<sid>.json。
+ * 「恢复上次登录」就是把这些 jar 列出来，重开同一个 sid：
+ * 站点看到会话 cookie，可能直接就是登录态，页面里的 token 扫描会把 token 再回传一次
+ * —— 不需要密码，也不需要再输一次验证码。
+ * 这里只记元信息（哪个账号用过、什么时候），cookie 值永远不出这个文件。
+ * ------------------------------------------------------------------ */
+const SESSIONS_FILE = path.join(STATE_DIR, 'login-sessions.json');
+
+function readSessions() {
+  try {
+    const doc = JSON.parse(fs.readFileSync(SESSIONS_FILE, 'utf8'));
+    return doc && typeof doc === 'object' ? doc : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeSessions(doc) {
+  try {
+    fs.mkdirSync(STATE_DIR, { recursive: true });
+    fs.writeFileSync(SESSIONS_FILE, JSON.stringify(doc, null, 2), { mode: 0o600 });
+  } catch {}
+}
+
+/** 记一笔：这个 sid 上发生过登录回传（token 本身不存这里，只存归属与时间） */
+export function noteLoginSession(sid, { accountId = '', email = '', source = '' } = {}) {
+  if (!sid) return;
+  const doc = readSessions();
+  const prev = doc[sid] || {};
+  doc[sid] = {
+    sid,
+    at: Date.now(),
+    accountId: accountId || prev.accountId || '',
+    email: email || prev.email || '',
+    source: source || prev.source || '',
+    hits: (prev.hits || 0) + 1,
+  };
+  // 只保留最近 40 条记录，避免无限增长
+  const keys = Object.keys(doc).sort((a, b) => (doc[b].at || 0) - (doc[a].at || 0));
+  for (const k of keys.slice(40)) delete doc[k];
+  writeSessions(doc);
+}
+
+/** 列出本机所有登录会话（有 cookie 的 jar），最近的在前 */
+export function listLoginSessions() {
+  const doc = readSessions();
+  const out = [];
+  let files = [];
+  try {
+    files = fs.readdirSync(STATE_DIR).filter((f) => f.startsWith('jar-') && f.endsWith('.json'));
+  } catch {
+    files = [];
+  }
+  for (const file of files) {
+    const sid = file.slice(4, -5);
+    const full = path.join(STATE_DIR, file);
+    let jar = {};
+    let mtime = 0;
+    let bytes = 0;
+    try {
+      jar = JSON.parse(fs.readFileSync(full, 'utf8')) || {};
+      const st = fs.statSync(full);
+      mtime = st.mtimeMs;
+      bytes = st.size;
+    } catch {
+      continue;
+    }
+    const names = Object.keys(jar);
+    if (!names.length) continue;
+    const meta = doc[sid] || {};
+    out.push({
+      sid,
+      cookies: names.length,
+      // 站点会话 cookie 的名字（不含值），让用户能判断「这是不是还活着的那次」
+      names: names.slice(0, 8),
+      updatedAt: Math.round(mtime),
+      at: meta.at || Math.round(mtime),
+      accountId: meta.accountId || '',
+      email: meta.email || '',
+      source: meta.source || '',
+      hits: meta.hits || 0,
+      bytes,
+    });
+  }
+  out.sort((a, b) => (b.at || 0) - (a.at || 0));
+  return out;
+}
+
+/** 删掉一个登录会话（jar + 记录），恢复列表里清理没用的那次 */
+export function forgetLoginSession(sid) {
+  const clean = String(sid || '').replace(/[^a-zA-Z0-9_-]/g, '');
+  if (!clean) return false;
+  let removed = false;
+  const file = jarFile(clean);
+  try {
+    if (fs.existsSync(file)) {
+      fs.rmSync(file, { force: true });
+      removed = true;
+    }
+  } catch {}
+  const doc = readSessions();
+  if (doc[clean]) {
+    delete doc[clean];
+    writeSessions(doc);
+    removed = true;
+  }
+  return removed;
+}
+
 function logLine(line) {
   try {
     fs.mkdirSync(STATE_DIR, { recursive: true });
@@ -344,6 +454,18 @@ export function startLoginProxy({ port = 18090, reportUrl }) {
       const bodyText = payload.toString('utf8');
       let brief = '';
       try { brief = bodyText.slice(0, 120).replace(/\s+/g, ' '); } catch {}
+      // 记一份「这次登录发生在哪个会话上」：恢复上次登录靠它，比让用户自己猜强
+      try {
+        const sidNow = (String(req.headers.cookie || '').match(new RegExp('(?:^|;\\s*)' + SID_COOKIE + '=([^;]+)')) || [])[1] || '';
+        let parsed = {};
+        try { parsed = JSON.parse(bodyText) || {}; } catch {}
+        const data = parsed.data || parsed || {};
+        noteLoginSession(sidNow, {
+          accountId: String(data.accountId || parsed.accountId || ''),
+          email: String(data.email || parsed.email || ''),
+          source: String(data.source || parsed.source || ''),
+        });
+      } catch {}
       logLine('REPORT ' + payload.length + 'B -> ' + target.origin + target.pathname + ' ' + brief);
       const upstream = http.request(
         {
@@ -351,7 +473,7 @@ export function startLoginProxy({ port = 18090, reportUrl }) {
           port: target.port || 80,
           path: target.pathname + target.search,
           method: 'POST',
-          headers: { 'content-type': 'application/json; charset=utf-8', 'content-length': payload.length, host: target.host },
+          headers: { 'content-type': 'application/json; charset=utf-8', 'content-length': payload.length, host: target.host, 'x-dsweb-sid': String((String(req.headers.cookie || '').match(new RegExp('(?:^|;\\s*)' + SID_COOKIE + '=([^;]+)')) || [])[1] || '') },
           timeout: 15000,
         },
         (up) => {
@@ -397,6 +519,17 @@ export function startLoginProxy({ port = 18090, reportUrl }) {
     // 会话 cookie：用我们自己的 dsweb_sid 关联一个 cookie jar，登录时捕获站点下发的 cookie
     const rawCookie = String(req.headers.cookie || '');
     let sid = (rawCookie.match(new RegExp('(?:^|;\\s*)' + SID_COOKIE + '=([^;]+)')) || [])[1] || '';
+    // 显式复用某个登录会话：?__dsweb_sid=xxx（「恢复上次登录」和指定账号重登都走这条）
+    // 只在浏览器没带 dsweb_sid 时生效，绝不会覆盖用户当前正在用的会话。
+    if (!sid) {
+      try {
+        const forced = (new URL(req.url, 'http://127.0.0.1').searchParams.get('__dsweb_sid') || '').replace(/[^a-zA-Z0-9_-]/g, '');
+        if (forced.length >= 8) {
+          sid = forced;
+          logLine('SESSION reuse ' + sid.slice(0, 8) + '… ' + req.url.slice(0, 60));
+        }
+      } catch {}
+    }
     if (!sid) sid = Math.random().toString(36).slice(2) + Date.now().toString(36);
     const jar = readJar(sid);
     const upstreamCookie = [rawCookie.split(';').map((x) => x.trim()).filter((x) => x && !x.startsWith(SID_COOKIE + '=')).join('; '), cookieHeader(jar)].filter(Boolean).join('; ');

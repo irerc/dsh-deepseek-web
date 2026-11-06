@@ -35,7 +35,7 @@ git+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web.git
 **② 发行版压缩包（镜像，最快）**
 
 ```
-https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.52/dsh-deepseek-web-1.0.52.tgz
+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.53/dsh-deepseek-web-1.0.53.tgz
 ```
 
 **③ 仓库页（镜像浏览）**
@@ -47,7 +47,7 @@ https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web
 > 镜像不可用时，把上面链接里的 `https://gh-proxy.com/` 去掉即可直连 GitHub（官方速度可能较慢）：
 >
 > - 插件 spec：`https://github.com/irerc/dsh-deepseek-web`
-> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.52/dsh-deepseek-web-1.0.52.tgz`
+> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.53/dsh-deepseek-web-1.0.53.tgz`
 
 **不需要任何 API key**：插件自带 provider 配置与本地网关（`127.0.0.1:18081`），装好即用。
 
@@ -129,6 +129,16 @@ dsh-deepseek-web doctor
 
 两种模式下，被禁言/封号的账号都会被账号池跳过。
 
+## 登录会话与账号管理
+
+**登录会话（cookie 罐）**：每次登录浏览器都会拿到一个本机会话 id，服务端 cookie 存在 `jar-<sid>.json`。设置页的「登录会话」卡把它们列出来：属于哪个账号、多少个 cookie、什么时候登的、token 回传过几次。站点还没掉登录时点「用这次会话登录」——重开同一个会话，页面把 token 直接抓回来，**不用密码、不用验证码**；确认没用的会话可以「清理」（只删 cookie 罐，账号不动）。
+
+**恢复上次登录**：账号卡上出现「恢复上次登录」按钮（仅当这个账号记录过登录会话），语义与上面一致，但会顺手把 token 原地回填到那个账号，不会多出一个重复账号。
+
+**重复账号检测与合并**：同一个 DeepSeek 账号（`user_id` 相同或完整邮箱相同）在账号库里登了两次是常事（先内嵌登一次、又用浏览器登一次）。「查重复」按 `user_id` / 完整邮箱分组，每组只留一个（优先「存了密码 + 采集过指纹 + 最近用过」），其余账号的 cookie、密码、分组先并到保留者身上再删除。面板会就地提示「发现 N 组重复账号」，点「一键合并」收口。
+
+**批量与排序**：点「多选」勾选账号，可一次启用 / 禁用 / 移组 / 删除；每个账号左右两侧的 `↑` `↓` 调整列表顺序（`order` 字段持久化，只影响显示与轮换起点）；「导出」只导这一个账号的 JSON（含 token/cookie，不含密码）。删除账号会一并清掉它保存的密码、登录会话关联，并把「当前账号」指针清空（不会留下指向幽灵账号的配置）。
+
 ## 设置项
 
 | 字段 | 默认 | 说明 |
@@ -141,9 +151,9 @@ dsh-deepseek-web doctor
 | saveLoginCredential | true | 登录成功时把登录表单里的邮箱+密码加密保存在本机（下次自动填表 / token 失效自动重登）；关掉则不保存 |
 | autoRelogin | true | token 失效时用保存的账号密码自动重新登录 |
 | requestMode | raw | 请求模式：`raw` 原始（提示词原样）/ `safe` 保险（插使用规范 + 更慢更保守） |
-| sectionOrder | usage,ledger,engine,accounts,addAccount,diagnostics | 设置页卡片顺序，由最下方「页面设置」的 ↑/↓ 调整 |
+| sectionOrder | usage,ledger,engine,accounts,addAccount,sessions,diagnostics | 设置页卡片顺序，由最下方「页面设置」的 ↑/↓ 调整 |
 
-设置页卡片从上到下默认是：网页版用量 → 调用台账 → 运行设置 → 账号管理 → 添加账号 → 登录状态 → 引擎日志 → 页面设置（没有账号时「添加账号」会临时置顶）。
+设置页卡片从上到下默认是：网页版用量 → 调用台账 → 运行设置 → 账号管理 → 添加账号 → 登录会话 → 登录状态 → 引擎日志 → 页面设置（没有账号时「添加账号」会临时置顶）。
 「页面设置」（默认收起）可以调整前五块的先后顺序（自动保存，可「恢复默认顺序」）。
 
 最底部是「关于」卡片：作者 irerc · DeepSeek Harness，显示插件名与版本。
@@ -202,6 +212,20 @@ bin/cli.mjs           login/accounts/start/stop/status/doctor
 MIT License
 
 ## 更新日志
+
+### v1.0.53
+
+**主题：登录与账号管理补全到「不用再问怎么办」的程度。**
+
+- **登录会话（jar）可恢复**：`server/proxy.mjs` 新增 `listLoginSessions()` / `noteLoginSession()` / `forgetLoginSession()`，只记元信息（归属账号、时间、回传次数、cookie 名），**cookie 值永不外传**。登录页回传 token 时会带上会话 id（`x-dsweb-sid`），账号记录里存下 `loginSid`。新增「登录会话」卡：列出本机会话、一键「用这次会话登录」、「清理」。站点没掉登录时重开同一会话即可把 token 抓回来，不用密码和验证码。
+- **显式会话复用**：登录代理支持 `?__dsweb_sid=xxx`，只在浏览器没带 `dsweb_sid` 时生效，绝不覆盖当前会话；会打一行 `SESSION reuse` 日志便于排查。
+- **重复账号检测与合并**：`duplicates()` 按 `user_id` / 完整邮箱分组；`mergeDuplicates()` 每组保留「存密码 + 有指纹 + 最近使用」的那个，把 cookie / 密码 / 分组 / 指纹先并过去再删除，并把指向被删账号的「当前账号」改成保留者。面板提示 + 「一键合并」。
+- **批量操作与排序**：`bulkAccounts()` 支持 enable / disable / delete / group，`moveAccount()` / `reorderAccounts()` 持久化 `order` 字段；面板加「多选」勾选条与每账号 `↑` `↓`、单账号「导出」（`exportAccount()`，不含密码）。
+- **删除账号的连带清理**：删掉当前账号时清空 `activeAccountId`，不再留下指向幽灵账号的配置；批量删除同样处理。
+- **路由**：`GET /accounts/duplicates`、`POST /accounts/duplicates/merge`、`POST /accounts/bulk`、`POST /accounts/reorder`、`POST /accounts/:id/move`、`GET /accounts/:id/export`、`GET /login/sessions`、`POST /login/restore`、`POST /login/sessions/forget`。
+- 新增测试 `account-mgmt-test.mjs`（44 项：order/move/reorder、重复检测与合并、单账号导出、批量、删除清凭证、会话列表/记录上限/非法 sid 拦截）、`mgmt-route-test.mjs`（33 项：以上路由端到端）、`sessions-ui-test.mjs`（26 项：会话卡、恢复按钮、勾选批量、排序按钮、重复提示）。
+
+> 升级说明：改了 `server/*` 与 `lib/*`，需**重启 DSH**；UI 刷新设置页即可。新增的「登录会话」卡在旧配置下会自动排进卡片顺序（`sectionOrder` 已含 `sessions`）。
 
 ### v1.0.52
 

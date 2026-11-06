@@ -11,6 +11,24 @@ const ACCOUNTS_FILE = path.join(STATE_DIR, 'accounts.json');
 
 let rr = 0;
 
+/**
+ * 账号顺序：面板上的排列顺序由 order 字段决定（为空时退回 0，再按加入时间）。
+ * 只影响「显示 + 轮换起点」，不动任何一个账号的凭证。
+ */
+function orderOf(a) {
+  return Number.isFinite(a && a.order) ? a.order : 0;
+}
+
+function sortedByOrder(list) {
+  return list
+    .slice()
+    .sort((x, y) => orderOf(x) - orderOf(y) || (x.addedAt || 0) - (y.addedAt || 0));
+}
+
+function nextOrder(doc) {
+  return doc.accounts.reduce((m, a) => Math.max(m, orderOf(a)), 0) + 10;
+}
+
 function readJson(file, fallback) {
   try {
     return JSON.parse(fs.readFileSync(file, 'utf8'));
@@ -54,6 +72,7 @@ export function publicAccount(a) {
   const cooling = a.cooldownUntil && a.cooldownUntil > now;
   return {
     id: a.id,
+    order: orderOf(a),
     label: a.label,
     // email 优先给完整地址；只有脱敏地址时也返回，但标记 emailMasked，界面提示用户补全
     email: fullEmailOf(a) || a.email || '',
@@ -83,6 +102,9 @@ export function publicAccount(a) {
     loginAt: a.loginAt || a.addedAt || null,
     // 所属分组 id（空 = 未分组）。分组只影响面板显示，不参与调度
     groupId: a.groupId || '',
+    // 这个账号上次是用哪个登录会话（jar）登上的：「恢复上次登录」会复用它，不用密码
+    loginSid: a.loginSid || '',
+    loginSidAt: a.loginSidAt || null,
     // cookie 构成（项数/会话级/持久级/最长剩余天数）：判断「为什么又要重登」的硬证据
     cookieShape: shapeForCookie(a.cookie),
     active: false,
@@ -92,7 +114,7 @@ export function publicAccount(a) {
 export function listAccounts() {
   let activeId = '';
   try { activeId = loadConfig().activeAccountId || ''; } catch {}
-  return loadAccounts().accounts.map((a) => {
+  return sortedByOrder(loadAccounts().accounts).map((a) => {
     const out = publicAccount(a);
     out.active = Boolean(activeId) && activeId === a.id;
     return out;
@@ -137,6 +159,7 @@ export function addAccount({ token, label, cookie = '', email = '', userId = '',
     failures: 0,
     status: 'ok',
     disabled: false,
+    order: nextOrder(doc),
   };
   doc.accounts.push(account);
   save(doc);
@@ -303,6 +326,7 @@ export function importAccounts(data) {
       disabled: false,
       loginSource: '导入备份',
       groupId: typeof item.groupId === 'string' ? item.groupId : '',
+      order: nextOrder(doc),
     });
     added += 1;
   }
@@ -468,6 +492,213 @@ export function markReloginFailed(id, message = '', { needCode = false, needBrow
   account.reloginFailures = (account.reloginFailures || 0) + 1;
   account.lastReloginFailAt = Date.now();
   account.reloginBlocked = needCode ? 'needCode' : needBrowserLogin ? 'needBrowserLogin' : String(message || '').slice(0, 200);
+  save(doc);
+  return publicAccount(account);
+}
+
+/* ------------------------------------------------------------------ *
+ * 账号管理：排序 / 重复检测 / 单账号导出 / 批量操作 / 登录会话归属
+ * 这些函数只动账号库本身，不发任何网络请求（批量检测在 lib/index.js 里逐个调 check）。
+ * ------------------------------------------------------------------ */
+
+/** 取一个账号（含内部字段，调用方自己负责不要外泄 token） */
+export function findAccount(id) {
+  return loadAccounts().accounts.find((a) => a.id === id) || null;
+}
+
+/**
+ * 上移 / 下移一个账号（面板上的 ↑ ↓）。返回是否真的动了。
+ * 只在同一顺序表里交换 order，不会重排整张表之外的东西。
+ */
+export function moveAccount(id, dir) {
+  const doc = loadAccounts();
+  const list = sortedByOrder(doc.accounts);
+  // 先归一化：老数据没有 order 时按当前显示顺序补齐，避免交换时出现并列
+  list.forEach((a, i) => {
+    a.order = (i + 1) * 10;
+  });
+  const i = list.findIndex((a) => a.id === id);
+  if (i < 0) return { ok: false, moved: false, message: '账号不存在' };
+  const j = dir === 'up' ? i - 1 : i + 1;
+  if (j < 0 || j >= list.length) {
+    save(doc);
+    return { ok: true, moved: false, message: dir === 'up' ? '已经在最前面了' : '已经在最后面了' };
+  }
+  const t = list[i].order;
+  list[i].order = list[j].order;
+  list[j].order = t;
+  save(doc);
+  return { ok: true, moved: true, message: '顺序已调整' };
+}
+
+/** 重排成给定顺序（拖拽或多选移动后用） */
+export function reorderAccounts(ids) {
+  const doc = loadAccounts();
+  const want = (Array.isArray(ids) ? ids : []).map(String);
+  const list = sortedByOrder(doc.accounts);
+  const picked = [];
+  for (const id of want) {
+    const a = list.find((x) => x.id === id && !picked.includes(x));
+    if (a) picked.push(a);
+  }
+  for (const a of list) if (!picked.includes(a)) picked.push(a);
+  picked.forEach((a, i) => {
+    a.order = (i + 1) * 10;
+  });
+  save(doc);
+  return { ok: true, order: picked.map((a) => a.id) };
+}
+
+function dupKeyOf(a) {
+  if (a.userId) return 'u:' + a.userId;
+  const mail = fullEmailOf(a);
+  if (mail) return 'e:' + mail.toLowerCase();
+  return '';
+}
+
+/**
+ * 找重复账号：同一个 DeepSeek 账号（user_id 相同）或同一个完整邮箱，在账号库里出现了多次。
+ * 典型场景：先内嵌登一次，又用浏览器登一次 → 两个 token、同一个号。
+ */
+export function duplicates() {
+  const doc = loadAccounts();
+  const buckets = new Map();
+  for (const a of sortedByOrder(doc.accounts)) {
+    const key = dupKeyOf(a);
+    if (!key) continue;
+    if (!buckets.has(key)) buckets.set(key, []);
+    buckets.get(key).push(a);
+  }
+  const groups = [];
+  for (const [key, list] of buckets) {
+    if (list.length < 2) continue;
+    groups.push({
+      key,
+      reason: key.startsWith('u:') ? 'user_id 相同' : '邮箱相同',
+      accounts: list.map((a) => ({ ...publicAccount(a), loginAt: a.loginAt || null })),
+    });
+  }
+  return { ok: true, groups, total: groups.reduce((n, g) => n + g.accounts.length, 0) };
+}
+
+/**
+ * 合并重复账号：每组只留一个（优先「保存了密码 + 有指纹 + 最近用过」的那个），
+ * 其余账号里有价值的东西（cookie / 密码 / 分组）先并到保留者身上再删除。
+ */
+export function mergeDuplicates() {
+  const doc = loadAccounts();
+  const buckets = new Map();
+  for (const a of sortedByOrder(doc.accounts)) {
+    const key = dupKeyOf(a);
+    if (!key) continue;
+    if (!buckets.has(key)) buckets.set(key, []);
+    buckets.get(key).push(a);
+  }
+  const score = (a) =>
+    (a.loginPassword ? 4 : 0) +
+    (a.fingerprint && Object.keys(a.fingerprint).length ? 2 : 0) +
+    (a.cookie ? 1 : 0);
+  let removed = 0;
+  const mergedGroups = [];
+  for (const [, list] of buckets) {
+    if (list.length < 2) continue;
+    const ranked = list.slice().sort(
+      (a, b) =>
+        score(b) - score(a) ||
+        (b.lastUsedAt || b.loginAt || b.addedAt || 0) - (a.lastUsedAt || a.loginAt || a.addedAt || 0),
+    );
+    const keeper = ranked[0];
+    const keepIds = new Set();
+    for (const other of ranked.slice(1)) {
+      if (!keeper.cookie && other.cookie) keeper.cookie = other.cookie;
+      if (!keeper.loginPassword && other.loginPassword) {
+        keeper.loginPassword = other.loginPassword;
+        keeper.loginEmail = other.loginEmail || '';
+        keeper.loginSavedAt = other.loginSavedAt || Date.now();
+      }
+      if (!fullEmailOf(keeper) && fullEmailOf(other)) {
+        keeper.emailFull = fullEmailOf(other);
+        keeper.email = keeper.email || other.email;
+      }
+      if (!keeper.groupId && other.groupId) keeper.groupId = other.groupId;
+      if (!keeper.userId && other.userId) keeper.userId = other.userId;
+      const lu = Math.max(keeper.lastUsedAt || 0, other.lastUsedAt || 0);
+      keeper.lastUsedAt = lu || null;
+      if (!keeper.fingerprint && other.fingerprint) {
+        keeper.fingerprint = other.fingerprint;
+        keeper.fingerprintAt = other.fingerprintAt || null;
+      }
+      keeper.order = Math.min(orderOf(keeper) || orderOf(other), orderOf(other) || orderOf(keeper));
+      keepIds.add(other.id);
+    }
+    const before = doc.accounts.length;
+    doc.accounts = doc.accounts.filter((a) => !keepIds.has(a.id));
+    removed += before - doc.accounts.length;
+    mergedGroups.push({ kept: keeper.id, keptLabel: keeper.label, removed: [...keepIds] });
+  }
+  if (removed) save(doc);
+  return { ok: true, removed, groups: mergedGroups, total: doc.accounts.length };
+}
+
+/** 导出单个账号（含 token / cookie，等于可登录凭证；不含密码） */
+export function exportAccount(id) {
+  const a = findAccount(id);
+  if (!a) return null;
+  return {
+    version: 1,
+    exportedAt: new Date().toISOString(),
+    accounts: [
+      {
+        label: a.label,
+        token: a.token,
+        cookie: a.cookie || '',
+        email: a.email || '',
+        emailFull: a.emailFull || '',
+        userId: a.userId || '',
+        addedAt: a.addedAt || null,
+        loginSource: a.loginSource || '',
+        groupId: a.groupId || '',
+      },
+    ],
+  };
+}
+
+/**
+ * 批量操作：enable / disable / delete / group。
+ * 返回实际影响到的账号 id，界面据此给「改了 N 个」的明确回执。
+ */
+export function bulkAccounts({ ids = [], action = '', groupId = '' } = {}) {
+  const want = new Set((Array.isArray(ids) ? ids : []).map(String).filter(Boolean));
+  if (!want.size) return { ok: false, message: '没有选中任何账号', affected: [] };
+  const doc = loadAccounts();
+  const hit = doc.accounts.filter((a) => want.has(a.id));
+  if (!hit.length) return { ok: false, message: '选中的账号都不存在', affected: [] };
+  if (action === 'enable') {
+    for (const a of hit) {
+      a.disabled = false;
+      if (a.status === 'disabled') a.status = 'ok';
+    }
+  } else if (action === 'disable') {
+    for (const a of hit) a.disabled = true;
+  } else if (action === 'delete') {
+    doc.accounts = doc.accounts.filter((a) => !want.has(a.id));
+  } else if (action === 'group') {
+    for (const a of hit) a.groupId = typeof groupId === 'string' ? groupId : '';
+  } else {
+    return { ok: false, message: '不支持的批量操作：' + String(action || '(空)'), affected: [] };
+  }
+  save(doc);
+  return { ok: true, action, affected: hit.map((a) => a.id), total: doc.accounts.length };
+}
+
+/** 记下这个账号最后一次是用哪个登录会话（jar）登上的，供「恢复上次登录」复用 */
+export function noteLoginSid(id, sid, { at = Date.now() } = {}) {
+  if (!id || !sid) return null;
+  const doc = loadAccounts();
+  const account = doc.accounts.find((a) => a.id === id);
+  if (!account) return null;
+  account.loginSid = String(sid).slice(0, 64);
+  account.loginSidAt = at;
   save(doc);
   return publicAccount(account);
 }
