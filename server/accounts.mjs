@@ -5,6 +5,7 @@ import crypto from 'node:crypto';
 import { STATE_DIR, ensureStateDir, loadConfig } from './config.mjs';
 import { encrypt, decrypt } from './credentials.mjs';
 import { deviceId } from './device.mjs';
+import { shapeForCookie } from './cookie-meta.mjs';
 
 const ACCOUNTS_FILE = path.join(STATE_DIR, 'accounts.json');
 
@@ -80,6 +81,10 @@ export function publicAccount(a) {
     hasFingerprint: Boolean(a.fingerprint && Object.keys(a.fingerprint).length),
     fingerprintAt: a.fingerprintAt || null,
     loginAt: a.loginAt || a.addedAt || null,
+    // 所属分组 id（空 = 未分组）。分组只影响面板显示，不参与调度
+    groupId: a.groupId || '',
+    // cookie 构成（项数/会话级/持久级/最长剩余天数）：判断「为什么又要重登」的硬证据
+    cookieShape: shapeForCookie(a.cookie),
     active: false,
   };
 }
@@ -217,6 +222,18 @@ export function getFingerprint(id) {
   return out;
 }
 
+/** 把账号放进某个分组（只影响显示；传空串 = 移出分组） */
+export function setGroup(id, groupId) {
+  const doc = loadAccounts();
+  const account = doc.accounts.find((a) => a.id === id);
+  if (!account) return null;
+  const gid = typeof groupId === 'string' ? groupId.trim() : '';
+  if (gid) account.groupId = gid;
+  else delete account.groupId;
+  save(doc);
+  return publicAccount(account);
+}
+
 /** 改备注（只改名字，不影响任何凭证） */
 export function renameAccount(id, label) {
   const doc = loadAccounts();
@@ -246,6 +263,7 @@ export function exportAccounts() {
       userId: a.userId || '',
       addedAt: a.addedAt || null,
       loginSource: a.loginSource || '',
+      groupId: a.groupId || '',
     })),
   };
 }
@@ -284,6 +302,7 @@ export function importAccounts(data) {
       status: 'ok',
       disabled: false,
       loginSource: '导入备份',
+      groupId: typeof item.groupId === 'string' ? item.groupId : '',
     });
     added += 1;
   }

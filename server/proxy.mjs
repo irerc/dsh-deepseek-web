@@ -14,6 +14,7 @@ import { fileURLToPath } from 'node:url';
 import { loadConfig, STATE_DIR } from './config.mjs';
 import { peekTicket, dropTicket } from './autologin.mjs';
 import { deviceId } from './device.mjs';
+import { noteSetCookies } from './cookie-meta.mjs';
 const SID_COOKIE = 'dsweb_sid';
 function jarFile(sid) {
   return path.join(STATE_DIR, 'jar-' + sid.replace(/[^a-zA-Z0-9_-]/g, '') + '.json');
@@ -483,6 +484,8 @@ export function startLoginProxy({ port = 18090, reportUrl }) {
         headers['set-cookie'] = [].concat(existing, SID_COOKIE + '=' + sid + '; Path=/; SameSite=Lax');
         const setCookies = up.headers['set-cookie'] || [];
         if (setCookies.length) {
+          // 顺手记下名字/到期形态（不存 value），面板的「cookie 构成」用它
+          try { noteSetCookies(setCookies); } catch {}
           for (const c of setCookies) {
             const m = String(c).match(/^([^=;]+)=([^;]*)/);
             if (m && m[1] !== SID_COOKIE) jar[m[1]] = m[2];

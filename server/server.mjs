@@ -9,6 +9,7 @@ import { loadConfig, STATE_DIR } from './config.mjs';
 import { currentMode, modeLimits, guardMessage, contractFor, GUARD_MARK } from './request-mode.mjs';
 import { convLabelOf } from './conv-label.mjs';
 import { estimateTokens, computeUsage } from './usage.mjs';
+import { noteCall } from './ledger.mjs';
 import * as accountStore from './accounts.mjs';
 
 const USAGE_FILE = path.join(STATE_DIR, 'usage.json');
@@ -809,8 +810,24 @@ async function handleChat(req, res) {
   };
 
   let parser = null; // 用量统计（真实 token 数）在 try 之外读，这里提前声明
+  // 台账：只记「一次对话」的结束时刻/耗时/结果，写失败一律吞掉，绝不影响对话
+  const t0 = Date.now();
+  let out = null;
+  const noteChat = (ok, code = '') => {
+    try {
+      noteCall({
+        at: Date.now(),
+        ms: Date.now() - t0,
+        ok,
+        purpose: 'chat',
+        accountId: (out && out.accountId) || (prev && prev.accountId) || '',
+        code,
+        throttled: /RATE|rate_limit|频繁|429/.test(String(code)),
+        muted: /MUTED|is_muted/i.test(String(code)),
+      });
+    } catch {}
+  };
   try {
-    const t0 = Date.now();
     log('[chat] send model=' + modelId + ' msgs=' + messages.length + ' tools=' + tools.length + ' conv=' + convKey.slice(0, 8) + ' session=' + (prev?.sessionId ? prev.sessionId.slice(0, 8) : 'new') + ' thinking=' + model.thinking);
     parser = createStreamParser((d) => {
       if (process.env.DSW_DEBUG_STREAM) log('[stream] ' + (d.text ? 'text(' + d.text.length + '):' + JSON.stringify(d.text.slice(0, 80)) : 'reasoning(' + String(d.reasoning || '').length + ')'));
@@ -827,7 +844,6 @@ async function handleChat(req, res) {
 
     // 上游偶尔会「200 但正文和工具调用都是空」——DSH 把它当成 EMPTY_RESPONSE，
     // 整轮直接失败。这里等 10 秒换新会话重试，最多 3 次。
-    let out = null;
     const MAX_ATTEMPTS = 3;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       const useSession = attempt === 1 ? (prev?.sessionId || null) : null;
@@ -868,8 +884,9 @@ async function handleChat(req, res) {
         }
         // 站点明确报错（限流/会话失效）：不要再盲重重试，直接把原因回给客户端
         log('[chat] upstream error: ' + JSON.stringify(upstreamError));
+        const rate = /频繁|rate limit/i.test(upstreamError.message) || upstreamError.finish === 'rate_limit_reached';
+        noteChat(false, rate ? 'RATE_LIMIT' : 'UPSTREAM');
         if (!headersSent) {
-          const rate = /频繁|rate limit/i.test(upstreamError.message) || upstreamError.finish === 'rate_limit_reached';
           json(res, rate ? 429 : 502, {
             error: { message: '网页版返回错误：' + upstreamError.message, type: rate ? 'rate_limit' : 'upstream_error' },
           });
@@ -908,6 +925,11 @@ async function handleChat(req, res) {
     log('[chat] done in ' + (Date.now() - t0) + 'ms chars=' + textOut.length + ' reasoning=' + reasoningOut.length + ' calls=' + calls.length + ' msgId=' + next.parentId);
   } catch (e) {
     log('[chat] error: ' + (e.message || e));
+    const msg = String(e && e.message ? e.message : e);
+    noteChat(
+      false,
+      /timeout|超时/i.test(msg) ? 'TIMEOUT' : /abort/i.test(msg) ? 'ABORTED' : /频繁|rate limit|429/i.test(msg) ? 'RATE_LIMIT' : 'TRANSPORT',
+    );
     if (!headersSent) return json(res, 502, { error: { message: String(e.message || e), type: 'upstream_error' } });
   }
 
@@ -986,6 +1008,7 @@ async function handleChat(req, res) {
   }
   const toolCalls = safeCalls.map((c, i) => ({ id: 'call_' + id.slice(8, 18) + i, type: 'function', function: { name: c.name, arguments: c.arguments } }));
 
+  noteChat(true);
   if (stream) {
     if (toolCalls.length) {
       if (!headersSent) sendChunk({ role: 'assistant', content: '' });

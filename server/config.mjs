@@ -45,11 +45,11 @@ export const DEFAULTS = {
   defaultAccount: null, // 不指定时按账号池轮询
   port: Number(process.env.DEEPSEEK_BRIDGE_PORT || 18081),
   // 设置页卡片显示顺序（由设置页最下方的「页面设置」修改）
-  sectionOrder: ['usage', 'engine', 'accounts', 'addAccount'],
+  sectionOrder: ['usage', 'ledger', 'engine', 'accounts', 'addAccount', 'diagnostics'],
 };
 
 // 可排序的卡片 key（顺序即默认顺序）
-export const SECTION_KEYS = ['usage', 'engine', 'accounts', 'addAccount'];
+export const SECTION_KEYS = ['usage', 'ledger', 'engine', 'accounts', 'addAccount', 'diagnostics'];
 
 export function ensureStateDir() {
   fs.mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 });
