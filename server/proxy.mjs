@@ -150,6 +150,40 @@ function writeAsset(url, buf) {
     fs.writeFileSync(assetPath(url), buf);
   } catch {}
 }
+/** 站点 JS 的本地化改写（生产环境标记 + 资源路径走代理） */
+function rewriteAsset(target, ctype, buf) {
+  if (!String(ctype || '').includes('javascript')) return buf;
+  let js = buf.toString('utf8');
+  // 让站点认为自己在生产环境（否则用 dev 公钥，登录解密会被服务端拒绝）
+  js = js.replace('if(e.match(/(\\d{1,3}\\.){3,3}\\d{1,3}/))return"dev";', 'if(true)return"production";');
+  js = js.split('"https://fe-static.deepseek.com/chat/"').join('"/cdn/"');
+  return Buffer.from(js, 'utf8');
+}
+
+// 后台刷新：同一资源 6 小时内只刷一次，避免每个请求都去撞上游
+const assetRefreshAt = new Map();
+const assetRefreshing = new Set();
+function refreshAssetInBackground(target, headers) {
+  const key = assetKey(target);
+  const last = assetRefreshAt.get(key) || 0;
+  if (Date.now() - last < 6 * 3600 * 1000) return;
+  if (assetRefreshing.has(key)) return;
+  assetRefreshing.add(key);
+  assetRefreshAt.set(key, Date.now());
+  fetchUpstream(target, 'GET', headers, Buffer.alloc(0), 1, 4000)
+    .then((r) => {
+      const ctype = r.up ? String(r.up.headers['content-type'] || '') : '';
+      if (!r.up || r.up.statusCode !== 200 || !/javascript|text\/css|font|image|octet-stream/.test(ctype)) return;
+      const buf = rewriteAsset(target, ctype, r.buf);
+      if (buf.length > 1024) writeAsset(target, buf);
+    })
+    .catch(() => {})
+    .finally(() => {
+      assetRefreshing.delete(key);
+      try { pruneAssets(); } catch {}
+    });
+}
+
 /** 上游彻底失败（连不上 / 一直 202）时给一张能看的页面，而不是空白 iframe 或一行纯文本 */
 function retryPage(reason) {
   return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -193,7 +227,14 @@ const upstreamAgent = new https.Agent({ keepAlive: true, keepAliveMsecs: 30000, 
 // 不至于让用户对着空白 iframe 发呆。
 const PAGE_TTL_MS = 30 * 60 * 1000;
 function pageKey(target) {
-  return 'page::' + target;
+  // 页面 HTML 与查询串无关（__dsweb_acct / __dsweb_auto 都是前端运行时读的），
+  // 统一按 path 缓存：不同账号的登录链接共用同一份页面，命中率更高、更抗风控。
+  try {
+    const u = new URL(target);
+    return 'page::' + u.origin + u.pathname;
+  } catch {
+    return 'page::' + String(target).split('?')[0];
+  }
 }
 function readPage(target) {
   try {
@@ -205,6 +246,7 @@ function readPage(target) {
     return null;
   }
 }
+const pageRefreshing = new Set();
 function writePage(target, buf) {
   try {
     writeAsset(pageKey(target), buf);
@@ -259,6 +301,29 @@ export function startLoginProxy({ port = 18090, reportUrl }) {
       );
       return;
     }
+    // ---- 诊断：登录页打不开时先看这里，能分清「缓存有没有」「代理活没活」----
+    if (req.method === 'GET' && req.url.startsWith('/__dsweb/health')) {
+      let assetsCount = 0;
+      let pagesCount = 0;
+      try {
+        for (const f of fs.readdirSync(ASSET_DIR)) {
+          const full = path.join(ASSET_DIR, f);
+          try {
+            const size = fs.statSync(full).size;
+            if (size > 1024) assetsCount += 1;
+          } catch {}
+        }
+      } catch {}
+      try {
+        const pageFile = assetPath(pageKey('https://' + siteHost() + '/sign_in'));
+        const st = fs.statSync(pageFile);
+        pagesCount = Date.now() - st.mtimeMs < PAGE_TTL_MS ? 1 : 0;
+      } catch {}
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+      res.end(JSON.stringify({ ok: true, port, uptimeSec: Math.round(process.uptime()), cachedAssets: assetsCount, pageCached: Boolean(pagesCount), site: siteHost() }));
+      return;
+    }
+
     // ---- token 回传：页面 POST 到同源的 /__dsweb/report，这里再转发给插件 ----
     // 以前页面直接 POST 到 http://127.0.0.1:38445/...（跨 origin），浏览器会先发 OPTIONS 预检；
     // 预检一旦被网关/系统浏览器拦掉，页面就只看到「网络失败 … Failed to fetch」，
@@ -337,37 +402,35 @@ export function startLoginProxy({ port = 18090, reportUrl }) {
     if (upstreamCookie) headers.cookie = upstreamCookie;
     if (body.length) headers['content-length'] = String(body.length);
 
-    // 静态资源（/cdn/…）：带重试 + 磁盘缓存，CDN 抽风也不至于白屏
+    // 静态资源（/cdn/…）：缓存优先，后台刷新。
+    // 上游这会儿很慢 / 被墙（实测 main.js 要 47 秒才回来），以前是「先等上游、失败才回缓存」，
+    // 浏览器早就白屏了。现在只要磁盘里有缓存就直接毫秒级发出去，再顺手在后台更新一份。
     if (isCdn) {
-      // 快速重试（6s × 2）；失败后立刻回缓存，别让用户对着白屏等 30 秒
+      const ext = path.extname(new URL(target).pathname).toLowerCase();
+      const type = ext === '.js' ? 'application/javascript; charset=utf-8' : ext === '.css' ? 'text/css; charset=utf-8' : ext === '.svg' ? 'image/svg+xml' : ext === '.woff2' || ext === '.woff' ? 'font/woff2' : 'application/octet-stream';
+      const sendCached = (buf, label) => {
+        logLine(label + ' ' + req.url);
+        res.writeHead(200, { 'content-type': type, 'cache-control': 'public, max-age=3600' });
+        res.end(buf);
+      };
+      const cached = readAsset(target);
+      if (cached && cached.length > 1024) {
+        sendCached(cached, 'CACHE-FIRST');
+        refreshAssetInBackground(target, headers);
+        return;
+      }
+      // 没缓存才走上游：快速重试（6s × 2），失败就报错
       const r = await fetchUpstream(target, req.method, headers, body, 2, 6000);
       const ctype0 = r.up ? String(r.up.headers['content-type'] || '') : '';
       const good = r.up && (r.up.statusCode || 0) === 200 && /javascript|text\/css|font|image|octet-stream/.test(ctype0);
       if (!good) {
-        const cached = readAsset(target);
-        if (cached) {
-          logLine('CACHE-HIT ' + req.url);
-          const ext = path.extname(new URL(target).pathname).toLowerCase();
-          const type = ext === '.js' ? 'application/javascript; charset=utf-8' : ext === '.css' ? 'text/css; charset=utf-8' : 'application/octet-stream';
-          res.writeHead(200, { 'content-type': type, 'cache-control': 'public, max-age=600' });
-          res.end(cached);
-          return;
-        }
         logLine('ERROR ' + (req.method || 'GET') + ' ' + req.url + ' ' + ((r.error && r.error.message) || 'unknown'));
         res.writeHead(502, { 'content-type': 'text/plain; charset=utf-8' });
-        res.end('资源加载失败（已重试 3 次）：' + ((r.error && r.error.message) || 'unknown'));
+        res.end('资源加载失败（已重试 2 次）：' + ((r.error && r.error.message) || 'unknown'));
         return;
       }
-      const ctype = ctype0;
-      let buf = r.buf;
-      if (ctype.includes('javascript')) {
-        let js = buf.toString('utf8');
-        // 让站点认为自己在生产环境（否则用 dev 公钥，登录解密会被服务端拒绝）
-        js = js.replace('if(e.match(/(\\d{1,3}\\.){3,3}\\d{1,3}/))return"dev";', 'if(true)return"production";');
-        js = js.split('"https://fe-static.deepseek.com/chat/"').join('"/cdn/"');
-        buf = Buffer.from(js, 'utf8');
-      }
-      if (good && buf.length > 1024 && /javascript|text\/css/.test(ctype)) {
+      const buf = rewriteAsset(target, ctype0, r.buf);
+      if (buf.length > 1024 && /javascript|text\/css/.test(ctype0)) {
         writeAsset(target, buf);
         pruneAssets();
       }
@@ -376,6 +439,35 @@ export function startLoginProxy({ port = 18090, reportUrl }) {
       res.writeHead(r.up.statusCode || 200, outHeaders);
       res.end(buf);
       return;
+    }
+
+    // 登录页 HTML 也缓存优先：上游抓一次要 12s×3 重试（风控/网络差时更久），
+    // 页面内容 30 分钟内却几乎不变。有缓存就直接发；超过 5 分钟就在后台用「自我请求」刷新一份，
+    // 用户永远不用对着白屏等上游。
+    if (
+      (req.method === 'GET' || req.method === 'HEAD') &&
+      String(req.headers.accept || '').includes('text/html') &&
+      !req.headers['x-dsweb-refresh']
+    ) {
+      const cachedPage = readPage(target);
+      if (cachedPage) {
+        let age = 0;
+        try { age = Date.now() - fs.statSync(assetPath(pageKey(target))).mtimeMs; } catch {}
+        logLine('PAGE-CACHE-FIRST ' + req.url + ' age=' + Math.round(age / 1000) + 's');
+        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'x-dsweb-cache': 'hit' });
+        res.end(req.method === 'HEAD' ? undefined : cachedPage);
+        if (age > 5 * 60 * 1000 && !pageRefreshing.has(pageKey(target))) {
+          pageRefreshing.add(pageKey(target));
+          const port2 = (server.address() && server.address().port) || port;
+          const bg = http.get(
+            { host: '127.0.0.1', port: port2, path: req.url, headers: { ...req.headers, 'x-dsweb-refresh': '1' }, timeout: 60000 },
+            (up) => up.resume(),
+          );
+          bg.on('error', () => {});
+          bg.on('close', () => pageRefreshing.delete(pageKey(target)));
+        }
+        return;
+      }
     }
 
     const send = (attempt) => {

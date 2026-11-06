@@ -32,7 +32,7 @@ git+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web.git
 **② 发行版压缩包（镜像，最快）**
 
 ```
-https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.49/dsh-deepseek-web-1.0.49.tgz
+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.50/dsh-deepseek-web-1.0.50.tgz
 ```
 
 **③ 仓库页（镜像浏览）**
@@ -44,7 +44,7 @@ https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web
 > 镜像不可用时，把上面链接里的 `https://gh-proxy.com/` 去掉即可直连 GitHub（官方速度可能较慢）：
 >
 > - 插件 spec：`https://github.com/irerc/dsh-deepseek-web`
-> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.49/dsh-deepseek-web-1.0.49.tgz`
+> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.50/dsh-deepseek-web-1.0.50.tgz`
 
 **不需要任何 API key**：插件自带 provider 配置与本地网关（`127.0.0.1:18081`），装好即用。
 
@@ -199,6 +199,20 @@ bin/cli.mjs           login/accounts/start/stop/status/doctor
 MIT License
 
 ## 更新日志
+
+### v1.0.50
+
+**主题：先把登录做成「一定打得开」—— 登录页和静态资源都改成缓存优先。**
+
+- **修「内嵌登录白屏 / 一直转圈」的真正瓶颈**：上游拿一次登录页要 12 秒 × 3 次重试，`main.js` 实测要 **47 秒**才回来；以前的顺序是「先等上游、失败才回缓存」，浏览器早就白屏了。现在只要本地有缓存就**毫秒级直接返回**（实测登录页 29ms、`main.js` 22ms、CSS 10ms），再在后台更新一份。
+  - 页面缓存超过 5 分钟就在后台用一个带 `x-dsweb-refresh` 标记的「自我请求」刷新，用户永远不用等上游；
+  - 页面缓存键按 path 归一（`__dsweb_acct` / `__dsweb_auto` 只是前端运行时读的），不同账号的登录链接共用同一份缓存，命中率更高；
+  - 静态资源缓存键本来就丢掉 `?t=`，现在同一份缓存对所有加载都有效。
+- **新增诊断接口** `GET http://127.0.0.1:18090/__dsweb/health`：返回 `{ ok, port, uptimeSec, cachedAssets, pageCached, site }`。以后再出现「打不开」，先看一眼 `pageCached` 和 `cachedAssets`，就能分清是缓存空、还是上游/风控在拦。
+- 登录页请求在风控 202 时仍未变：重试 3 次（1.2s / 2.5s）→ 页面缓存 → 友好错误页；静态资源 2 次快速重试 → 缓存 → 502，不会返回 200 空内容。
+- 新增测试 `proxy-cache-test.mjs`（7 项：页面缓存命中、静态资源命中含任意 `?t=`、content-type 正确、未命中不伪装成功）与 `proxy-health-test.mjs`（4 项）。
+
+> 升级说明：只改了 `server/proxy.mjs`，但它是被 DSH 主进程加载的 —— **需要重启 DSH** 后生效（重启后第一次打开登录页会走缓存；缓存空时会自动抓一次，之后就快了）。
 
 ### v1.0.49
 
