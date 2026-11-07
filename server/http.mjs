@@ -1,5 +1,5 @@
 // 对 chat.deepseek.com 的基础 HTTP 调用：统一 UA / 客户端头 / 超时 / 错误分类
-import { deviceId } from './device.mjs';
+import { deviceId, deviceIdFor } from './device.mjs';
 import { tzOffsetSeconds } from './timezone.mjs';
 
 export const BASE = 'https://chat.deepseek.com';
@@ -16,7 +16,7 @@ export class UpstreamError extends Error {
   }
 }
 
-export function baseHeaders(token) {
+export function baseHeaders(token, accountId = '') {
   const headers = {
     'content-type': 'application/json',
     'user-agent': UA,
@@ -30,7 +30,8 @@ export function baseHeaders(token) {
     'x-client-timezone-offset': String(tzOffsetSeconds()),
     // 站点用 x-device-id 认设备（UUID v4）。以前引擎请求完全不带头，站点会把插件的请求当成
     // 「新设备」；现在和浏览器登录页、密码登录共用同一个 id，账号在站点看来始终是同一台设备。
-    'x-device-id': deviceId(),
+    // 每个账号一套设备 id：一个号被封，站点只知道「那台设备」，不会顺带把同机其它号一起处理。
+    'x-device-id': accountId ? deviceIdFor(accountId) : deviceId(),
     'x-device-model': '',
   };
   if (token) headers.authorization = 'Bearer ' + token;

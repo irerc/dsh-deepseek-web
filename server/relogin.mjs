@@ -8,6 +8,7 @@
 //     插件把保存的邮箱密码带过去自动填表（见 server/autologin.mjs + inject.html）。
 //     这种情况长时间冷却（6 小时）并标记 needBrowserLogin，后台扫描也不再空撞，免得越撞越黑。
 //   - 每个账号一个冷却，避免失效 token 每几秒重试一次把账号打到风控。
+import { deviceIdFor } from './device.mjs';
 import { loginWithPassword } from './login.mjs';
 import { loadConfig } from './config.mjs';
 import { getCredential, replaceToken, markReloginFailed, listAccounts } from './accounts.mjs';
@@ -71,7 +72,7 @@ async function reloginOnce(id, { reason = 'chat' } = {}) {
   }
   let out;
   try {
-    out = await loginWithPassword(cred.email, cred.password);
+    out = await loginWithPassword(cred.email, cred.password, { deviceId: deviceIdFor(id) });
   } catch (error) {
     out = { ok: false, message: String(error.message || error) };
   }

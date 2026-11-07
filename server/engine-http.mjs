@@ -10,7 +10,7 @@ import { reloginAccount } from './relogin.mjs';
 import { createStreamParser } from './stream-parser.mjs';
 import { BrowserTransport, browserAvailability } from './browser-transport.mjs';
 import { NativeTransport, nativeAvailability } from './native-transport.mjs';
-import { deviceId } from './device.mjs';
+import { deviceId, deviceIdFor } from './device.mjs';
 import { probeToken } from './token-check.mjs';
 import { deviceBrowserAvailability } from './device-browser.mjs';
 import { pickWarmupPhrases, warmupNeeded } from './warmup.mjs';
@@ -787,7 +787,7 @@ export class DeepSeekHttp {
     try {
       res = await this.native.request({
         path: targetPath,
-        headers: { ...baseHeaders(token), ...(cookie ? { cookie } : {}), ...fp, ...humanHeaders(), 'x-ds-pow-response': pow },
+        headers: { ...baseHeaders(token, accountId || ''), ...(cookie ? { cookie } : {}), ...fp, ...humanHeaders(), 'x-ds-pow-response': pow },
         body,
         timeout: Math.max(60, Math.ceil(idleMs / 1000) + 30),
       });
@@ -807,7 +807,7 @@ export class DeepSeekHttp {
     const targetPath = '/api/v0/chat/completion';
     const fp = accountId ? getFingerprint(accountId) : {};
     try {
-      await this.browser.installSession(token, cookie, deviceId());
+      await this.browser.installSession(token, cookie, accountId ? deviceIdFor(accountId) : deviceId());
     } catch (e) {
       throw new UpstreamError(
         '浏览器传输不可用：' + String(e.message || e) + '（去「运行设置 → 传输层」切到 Node 直连（高危），或装一个能跑的 Chrome / Edge）',
@@ -894,7 +894,7 @@ export class DeepSeekHttp {
     try {
       const res = await fetch(BASE + targetPath, {
         method: 'POST',
-        headers: { ...baseHeaders(token), ...(cookie ? { cookie } : {}), ...fp, ...humanHeaders(), 'x-ds-pow-response': pow },
+        headers: { ...baseHeaders(token, accountId || ''), ...(cookie ? { cookie } : {}), ...fp, ...humanHeaders(), 'x-ds-pow-response': pow },
         body: JSON.stringify({
           chat_session_id: sid,
           parent_message_id: parentId || null,

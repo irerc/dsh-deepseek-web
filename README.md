@@ -35,7 +35,7 @@ git+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web.git
 **② 发行版压缩包（镜像，最快）**
 
 ```
-https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.75/dsh-deepseek-web-1.0.75.tgz
+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.76/dsh-deepseek-web-1.0.76.tgz
 ```
 
 **③ 仓库页（镜像浏览）**
@@ -47,7 +47,7 @@ https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web
 > 镜像不可用时，把上面链接里的 `https://gh-proxy.com/` 去掉即可直连 GitHub（官方速度可能较慢）：
 >
 > - 插件 spec：`https://github.com/irerc/dsh-deepseek-web`
-> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.75/dsh-deepseek-web-1.0.75.tgz`
+> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.76/dsh-deepseek-web-1.0.76.tgz`
 
 **不需要任何 API key**：插件自带 provider 配置与本地网关（`127.0.0.1:18081`），装好即用。
 
@@ -340,6 +340,20 @@ bin/cli.mjs           login/accounts/start/stop/status/doctor
 MIT License
 
 ## 更新日志
+
+### v1.0.76
+**账号级设备隔离：一个号被封，不再牵连这台机器上的其它号**
+
+以前 `state/device.json` 里只有一个 `x-device-id`，所有账号共用——站点按设备归因，封一个号等于给这台设备记了一笔，同机其它号迟早跟着被处理。
+
+| 位置 | 以前 | 现在 |
+|---|---|---|
+| `x-device-id` | 全局一个 UUID | **每个账号一个 UUID**（`state/devices.json`） |
+| 密码登录 / 自动重登 | 用全局设备 id | 用该账号自己的设备 id，登录设备和聊天设备一致 |
+| 浏览器传输 | 全局 id | 该账号的 id |
+| 「清除设备痕迹」 | 全局换 id（所有号一起变新设备） | **只换这个账号**的设备 id，其它号不动 |
+
+迁移策略（不制造突发风险）：老账号第一次启动时**沿用原来的设备身份**，不一次性发新 id（同时冒出多台"新设备"更容易触发验证）。想换就逐个点「清除设备痕迹」，建议一次换一个、间隔几小时；此后新登录的账号自动分配独立设备 id。
 
 ### v1.0.75
 **所有登录动作默认拉起浏览器**

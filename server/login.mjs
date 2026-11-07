@@ -60,6 +60,7 @@ export async function sendEmailCode(email) {
  * 新设备首次登录会要求邮箱验证码（MFA），此时返回 needCode + mfaSessionId。
  */
 export async function loginWithPassword(email, password, opts = {}) {
+  const devId = opts.deviceId || deviceId();
   if (!email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return { ok: false, message: '邮箱格式不对' };
   if (!password || String(password).length < 6) return { ok: false, message: '密码看起来不对（至少 6 位）' };
   try {
@@ -70,7 +71,7 @@ export async function loginWithPassword(email, password, opts = {}) {
       mobile: '',
       area_code: '',
       password,
-      device_id: deviceId(),
+      device_id: devId,
       os: 'web',
     });
     const biz = res.json?.data?.biz_data || {};

@@ -61,3 +61,80 @@ export function resetDeviceId() {
 export function isDeviceId(v) {
   return typeof v === 'string' && UUID_V4.test(v);
 }
+
+// ── 每账号独立设备 id ──────────────────────────────────────────────────────
+// 为什么：站点把「设备」当成归因维度。一个账号被封，这台设备就被标了记号，
+// 同一台设备上登录的其它账号会跟着被连坐（用户实测就是这么炸的）。
+// 把设备 id 拆到账号级，等于这台机器在站点眼里是 N 台设备，封一个不会牵连其它。
+// 存 state/devices.json：{ "<accountId>": "<uuid>", "__default__": "<uuid>" }
+export function devicesFile() {
+  return path.join(STATE_DIR, 'devices.json');
+}
+
+function readDevices() {
+  try {
+    const raw = JSON.parse(fs.readFileSync(devicesFile(), 'utf8'));
+    return raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeDevices(map) {
+  try {
+    ensureStateDir();
+    fs.writeFileSync(devicesFile(), JSON.stringify(map, null, 2), { mode: 0o600 });
+  } catch {}
+}
+
+/** 取某个账号的设备 id（没有就生成并落盘）。accountId 为空 = 默认身份（登录页用） */
+export function deviceIdFor(accountId = '') {
+  if (!accountId) return deviceId(); // 默认身份永远走 device.json，不在 devices.json 里存第二份
+  const key = accountId;
+  if (cachedFor.has(key)) return cachedFor.get(key);
+  const map = readDevices();
+  let id = map[key];
+  if (!UUID_V4.test(String(id || ''))) {
+    // 老用户迁移：默认身份沿用旧 device.json 里的 id，避免已登录的机器突然「换设备」
+    id = crypto.randomUUID();
+    map[key] = id;
+    writeDevices(map);
+  }
+  cachedFor.set(key, id);
+  return id;
+}
+
+const cachedFor = new Map();
+
+/** 换掉某个账号（或默认身份）的设备 id，其它账号不受影响 */
+export function resetDeviceIdFor(accountId = '') {
+  if (!accountId) return resetDeviceId();
+  const key = accountId;
+  const map = readDevices();
+  map[key] = crypto.randomUUID();
+  writeDevices(map);
+  cachedFor.set(key, map[key]);
+  return map[key];
+}
+
+/**
+ * 一次性迁移：老用户的账号还没有自己的设备 id 时，先**沿用**当前的全局 id。
+ * 为什么不一上来就给每个号发新 id：那会让站点看到「同一时刻多台新设备登录」，
+ * 反而更容易触发验证/踢下线。想换，就到账号行点「清除设备痕迹」，一次换一个。
+ * 迁移之后新登录的账号才自动分配各自的设备 id。
+ */
+export function migrateAccountDevices(accountIds = []) {
+  const map = readDevices();
+  if (map.__migrated__) return { migrated: 0, already: true };
+  const shared = deviceId();
+  let migrated = 0;
+  for (const id of accountIds) {
+    if (!id || UUID_V4.test(String(map[id] || ''))) continue;
+    map[id] = shared;
+    cachedFor.set(id, shared);
+    migrated += 1;
+  }
+  map.__migrated__ = true;
+  writeDevices(map);
+  return { migrated, already: false };
+}

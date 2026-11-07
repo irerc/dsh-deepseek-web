@@ -9,7 +9,7 @@
 //   - 账号本身、它的历史对话、发布过的内容、IP、支付信息、以及站点已经记下的处置记录；
 //   - 「换新设备」这个动作本身也可能被当成新设备登录而触发额外验证。
 // 所以这个功能治的是「设备关联」，不是「账号历史」。
-import { deviceId, resetDeviceId } from './device.mjs';
+import { deviceId, deviceIdFor, resetDeviceId, resetDeviceIdFor } from './device.mjs';
 import { listAccounts, updateAccount } from './accounts.mjs';
 import { resetBudget } from './human-rhythm.mjs';
 
@@ -18,10 +18,12 @@ import { resetBudget } from './human-rhythm.mjs';
  * @returns {{ok:boolean, deviceId:string, previousDeviceId:string, accounts:number, cleared:string[]}}
  */
 export function wipeDeviceTrace(accountId = '') {
-  const previousDeviceId = deviceId();
-  const nextDeviceId = resetDeviceId();
   const all = listAccounts();
   const ids = (accountId ? all.filter((a) => a.id === accountId) : all).map((a) => a.id);
+  // 设备 id 是账号级的：只换这一台设备在这个账号上的身份，别的账号不受影响
+  // （以前全局换 id，一个号出问题把所有号的设备身份一起换掉，反而制造出「一批新设备」）
+  const previousDeviceId = accountId ? deviceIdFor(accountId) : deviceId();
+  const nextDeviceId = accountId ? resetDeviceIdFor(accountId) : resetDeviceId();
   for (const id of ids) {
     updateAccount(id, { fingerprint: null, fingerprintAt: null, warmupAt: null, lastUsedAt: null });
   }

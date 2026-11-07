@@ -1625,6 +1625,16 @@ if (process.env.DSW_SELFTEST_PROMPT) {
   process.exit(0);
 }
 
+// 每账号独立设备 id 的一次性迁移：老账号先沿用原设备身份，之后新账号自动分配各自的 id。
+// （迁移逻辑本身幂等，写 __migrated__ 标记，最多执行一次）
+try {
+  const { migrateAccountDevices } = await import('./device.mjs');
+  const done = migrateAccountDevices(accountStore.listAccounts().map((a) => a.id));
+  if (done.migrated) log(`device-id isolation: ${done.migrated} 个账号沿用原设备身份（之后可逐个「清除设备痕迹」换成独立设备）`);
+} catch (e) {
+  log('device-id migration skipped: ' + String(e.message || e));
+}
+
 server.listen(PORT, HOST, () => log(`deepseek-web-bridge listening on http://${HOST}:${PORT}`));
 
 for (const sig of ['SIGINT', 'SIGTERM']) {
