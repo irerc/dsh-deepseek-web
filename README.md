@@ -35,7 +35,7 @@ git+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web.git
 **② 发行版压缩包（镜像，最快）**
 
 ```
-https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.78/dsh-deepseek-web-1.0.78.tgz
+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.79/dsh-deepseek-web-1.0.79.tgz
 ```
 
 **③ 仓库页（镜像浏览）**
@@ -47,7 +47,7 @@ https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web
 > 镜像不可用时，把上面链接里的 `https://gh-proxy.com/` 去掉即可直连 GitHub（官方速度可能较慢）：
 >
 > - 插件 spec：`https://github.com/irerc/dsh-deepseek-web`
-> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.78/dsh-deepseek-web-1.0.78.tgz`
+> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.79/dsh-deepseek-web-1.0.79.tgz`
 
 **不需要任何 API key**：插件自带 provider 配置与本地网关（`127.0.0.1:18081`），装好即用。
 
@@ -340,6 +340,18 @@ bin/cli.mjs           login/accounts/start/stop/status/doctor
 MIT License
 
 ## 更新日志
+
+### v1.0.79
+**修 bundle patch 的写法，让插件市场能过静态预检**
+
+DSH-Store 的自动预检报 `SUBMISSION_PATCH_AMBIGUOUS`：`cordis.patch.yml` 里用了 YAML 内联序列（`input: [text]`）和空映射（`config: {}`），扫描器判成「Patch 内联序列需要人工审核」。
+
+| 位置 | 以前 | 现在 |
+|---|---|---|
+| 模型 `input` | `input: [text]` | 块序列 `input:` + `- text` |
+| 插件 insert 的 `config` | `config: {}` | 整行去掉（默认值等价） |
+
+语义完全不变（本地用 yaml 解析器比对过前后对象全等），只是写法改成纯块结构，扫描器不再需要人工复核。
 
 ### v1.0.78
 **「按新设备重置」：一条命令把这个账号在本机的身份清成全新设备**

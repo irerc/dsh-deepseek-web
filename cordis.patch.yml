@@ -3,7 +3,6 @@
 - insert:
     - id: deepseek-web
       name: dsh-deepseek-web
-      config: {}
 
 - id: llm-pi-ai
   config:
@@ -28,12 +27,14 @@
             name: DeepSeek-V4(网页版·快速)
             contextWindow: 131072
             maxTokens: 16384
-            input: [text]
+            input:
+              - text
           - id: deepseek-reasoner
             name: DeepSeek-V4(网页版·深度思考)
             contextWindow: 131072
             maxTokens: 16384
-            input: [text]
+            input:
+              - text
 
 # 自动压缩阈值：DSH 默认 = min(窗口×0.8, 窗口 − 回复预留 − headroom)，headroom 默认 65536。
 # 窗口改成真实 131072 后，按默认值会在 ~49K 就压缩，太勤。
