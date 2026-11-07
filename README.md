@@ -35,7 +35,7 @@ git+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web.git
 **② 发行版压缩包（镜像，最快）**
 
 ```
-https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.56/dsh-deepseek-web-1.0.56.tgz
+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.57/dsh-deepseek-web-1.0.57.tgz
 ```
 
 **③ 仓库页（镜像浏览）**
@@ -47,7 +47,7 @@ https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web
 > 镜像不可用时，把上面链接里的 `https://gh-proxy.com/` 去掉即可直连 GitHub（官方速度可能较慢）：
 >
 > - 插件 spec：`https://github.com/irerc/dsh-deepseek-web`
-> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.56/dsh-deepseek-web-1.0.56.tgz`
+> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.57/dsh-deepseek-web-1.0.57.tgz`
 
 **不需要任何 API key**：插件自带 provider 配置与本地网关（`127.0.0.1:18081`），装好即用。
 
@@ -121,16 +121,19 @@ dsh-deepseek-web doctor
 | Node fetch（undici） | `t13d5212h1_…` | — | **h1** |
 | Chrome / Edge | `t13d1516h2_…` | 一致 | h2 |
 
-这几项**调参修不了**（参考实现的实测表格也是这个结论）。所以 v1.0.56 起默认把对话请求交给**本机真实浏览器**：
+这几项**调参修不了**（参考实现的实测表格也是这个结论）。所以 v1.0.56 起把对话请求交给**本机真实浏览器**，v1.0.57 起改成三档：
 
 | 模式 | 请求由谁发出 | PoW 在哪解 | 需要什么 |
 |---|---|---|---|
-| `browser`（默认） | 本机 Chrome / Edge 的真实页面（CDP 驱动，页面真的登录着） | **页面上下文里用官方 wasm** | 本机有 Chrome / Edge / Chromium |
+| `auto`（默认，v1.0.57 起） | **优先**本机 Chrome / Edge 的真实页面（CDP 驱动，页面真的登录着） | 页面里用官方 wasm | 有能跑的浏览器；没有就回退 Node，并在设置页亮红字 |
+| `browser`（强制） | 同上，但**起不来就报错**，绝不静默降级 | 同上 | 必须真的有能跑的浏览器 |
 | `node`（高级选项，高危） | Node 直连（旧实现） | Node 里 `WebAssembly.instantiate` | 无 |
 
-- **找不到浏览器就明确报错**，不会静默退回 Node（那样等于这个改动没发生）。设置页「运行 → 传输层」有 **测试浏览器传输** 按钮，会真的起一次浏览器再收尸，把结果直接打出来。
+- **v1.0.57 的检测不再只看「文件在不在」**：候选范围覆盖 `PATH`、`/opt/google/chrome`、`/usr/lib/chromium*`、snap、flatpak，以及 **Playwright（`~/.cache/ms-playwright`）/ Puppeteer（`~/.cache/puppeteer`）缓存**（很多机器的 `/usr/bin/chromium` 只是软链到这些缓存）。设置页会显示**找到的路径 + 版本 + 能不能启动**，还能手填浏览器路径（`browserPath`，等价 `DSW_BROWSER_PATH`）。
+- 检测分两级：① 冒烟启动（`--dump-dom about:blank`）；② 真的起 BrowserTransport 连 CDP 开页面。**起不来必须报真实原因**（信号 / 退出码 / 最后几行日志），不能只说一句「检测不到」。
+- 「起不来」很多是**运行环境限制**而不是配置错误：例如 Android 手机容器里 Chromium 会在开页面时 `SIGTRAP`（`/dev/shm` 不可用、`/proc/sys/fs/inotify/*` 被 mask）。这种环境下 `auto` 会回退 Node 直连并明确告诉你风险；想「宁可报错也不回退」就选 `browser`。
 - 换号/换 token 时会把登录态重装进页面（cookie + `localStorage.userToken`），否则会出现「页面是登录页、请求却带合法 Authorization」这种真人身上不会有的组合。
-- 回滚：设置页切 `Node 直连（高危）`，或环境变量 `DS_NETWORK_TRANSPORT=node`（改完立即生效，不用降级版本）。
+- 回滚：设置页切 `Node 直连（高危）`，或环境变量 `DS_NETWORK_TRANSPORT=node`（改完立即生效，不用降级版本）；想强制「必须浏览器」用 `DS_NETWORK_TRANSPORT=browser`。
 - 传输层只影响**对话请求与 PoW**；列会话、体检这类只读管理请求仍走 Node。
 - 浏览器传输跑在无头模式；要过人机验证时用 `DSW_BROWSER_HEADED=1` 起可见窗口（同一个 profile，验证完把窗口关掉）。
 
@@ -289,6 +292,26 @@ bin/cli.mjs           login/accounts/start/stop/status/doctor
 MIT License
 
 ## 更新日志
+
+### v1.0.57
+
+修「明明有浏览器，插件却说检测不到 / 用不了」。三件事：
+
+**1. 检测范围扩到真的能找到浏览器**
+- 以前只扫 `/usr/bin/google-chrome`、`/usr/bin/chromium` 等几个固定路径。现在按 `PATH` 逐个找，再兜 `/opt/google/chrome/chrome`、`/opt/microsoft/msedge/msedge`、`/usr/lib/chromium{,-browser}/chrome`、`/snap/bin/chromium`、flatpak，以及 **Playwright（`~/.cache/ms-playwright/chromium-*/chrome-linux*/chrome`）/ Puppeteer（`~/.cache/puppeteer/...`）缓存**。很多机器（包括这台）的 `/usr/bin/chromium` 只是软链到这些缓存，只扫 `/usr/bin` 就会「明明有浏览器却检测不到」。
+- 新增 `browserPath` 设置（高级选项里可填，等价 `DSW_BROWSER_PATH`）：自动探测不中时手填可执行文件路径。
+
+**2. 区分「没有浏览器」和「有但起不来」**
+- 检测分两级：① 冒烟启动（`--dump-dom about:blank`，12 秒超时）；② 真的起 `BrowserTransport` 连 CDP、开页面。
+- 设置页显示：**找到的路径 + 版本 + 可启动 / 起不来**；起不来时给信号 / 退出码 / 最后几行日志。以前只显示「没找到 Chrome / Edge / Chromium」，把「装是装了，但环境跑不起来」也说成「没检测到」—— 这才是这次要修的真问题。
+
+**3. 传输层从两档改成三档（默认 `auto`）**
+- `auto`（默认）：优先真实浏览器；浏览器不可用时**自动回退 Node 直连**，同时在设置页亮红字「TLS 指纹可被识破，风险更高」。理由：`browser` 强制模式下，手机上/受限容器里插件会**完全不能用**——那不该是我替用户做的选择。
+- `browser`（强制）：起不来就明确报错，绝不静默降级（保留 v1.0.56 的「不许骗我」语义）。
+- `node`（高危）：旧实现。
+- 配置迁移：v1.0.56 及以前的配置没有 `configVersion`，`transport: browser` 视为旧默认值，一次性迁成 `auto`（其它设置一项不动）；想改回强制浏览器点一下就行。
+
+**本机实测**：这个 Android 容器里 Chromium **文件在、`--version` 能打，一开页面就 `SIGTRAP`**（Chrome for Testing 156 和 Chrome Stable 157 都一样；`/dev/shm` 不可读、`/proc/sys/fs/inotify/*` 被 mask）。所以这台机器上 `auto` 会解析成 `node` 并亮红字，`browser` 会给出「浏览器找到了但起不来：/usr/bin/chromium（…156.0.8078.4）—— 一开页面就崩溃（信号 SIGTRAP）」而不是「检测不到」。用例 `transport-test.mjs` 重写为 11 组断言（默认值 / 老配置迁移 / 三档切换 / `browserPath` / Playwright 缓存命中 / 版本与可用性 / auto 判定与可用性一致 / 强制 browser 不回退 / 起不来时的错误文案 / `transportStatus` 回退标记 / 收尸），全套 40 个用例通过。
 
 ### v1.0.56
 

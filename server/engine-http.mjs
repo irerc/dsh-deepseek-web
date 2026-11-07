@@ -6,22 +6,56 @@ import { currentMode, modeLimits, gapFor, rateWindowFor, LONG_RUN_THRESHOLD, HUM
 import { pickAccount, markUsed, markCooldown, setCooldown, markAuthExpired, markMuted, listAccounts, getToken, getCookie, getFingerprint } from './accounts.mjs';
 import { reloginAccount } from './relogin.mjs';
 import { createStreamParser } from './stream-parser.mjs';
-import { BrowserTransport } from './browser-transport.mjs';
+import { BrowserTransport, browserAvailability } from './browser-transport.mjs';
 import { deviceId } from './device.mjs';
 import { probeToken } from './token-check.mjs';
 
 /**
- * 传输层：browser（默认，走真实 Chromium 页面）/ node（直连，旧实现 —— 高级选项里，带高危提示）。
- * 找浏览器由 browser-transport 负责；找不到时**明确报错**，不静默退回 node（参考实现的破坏性变更）。
+ * 传输层三档：
+ *   auto（默认）  优先真实浏览器（TLS/JA4 = 浏览器，PoW 在页面里解）；**起不来才退回 Node**，并在设置页亮红字。
+ *   browser       强制浏览器：起不来就明确报错，绝不静默降级（要的就是这个「不许骗我」）。
+ *   node          Node 直连（旧实现，高危）。
+ * 之所以保留 auto：手机上/受限容器里很多 Chromium 根本起不来（例如 SIGTRAP），
+ * 强制 browser 会让插件在那种环境下**完全不能用**——那不是我该替用户做的选择。
  */
-export function transportMode() {
+export function configuredTransport() {
   const env = String(process.env.DS_NETWORK_TRANSPORT || '').toLowerCase();
-  if (env === 'node' || env === 'browser') return env;
+  if (env === 'node' || env === 'browser' || env === 'auto') return env;
   try {
-    return loadConfig().transport === 'node' ? 'node' : 'browser';
+    const v = loadConfig().transport;
+    return ['node', 'browser', 'auto'].includes(v) ? v : 'auto';
   } catch {
-    return 'browser';
+    return 'auto';
   }
+}
+
+let _resolved = '';
+let _lastWarnAt = 0;
+
+/** 同步读：auto 还没判定过时先按 browser（第一次请求会 await resolveTransport 再定） */
+export function transportMode() {
+  const c = configuredTransport();
+  if (c === 'node' || c === 'browser') return c;
+  return _resolved === 'node' ? 'node' : 'browser';
+}
+
+/** 真正决定这次请求走哪条路：auto 会先做一次浏览器冒烟检测（结果有 5 分钟缓存） */
+export async function resolveTransport() {
+  const c = configuredTransport();
+  if (c === 'node' || c === 'browser') {
+    _resolved = c;
+    return c;
+  }
+  const avail = await browserAvailability();
+  _resolved = avail.ok ? 'browser' : 'node';
+  if (!avail.ok && Date.now() - _lastWarnAt > 60000) {
+    _lastWarnAt = Date.now();
+    console.warn(
+      '[transport] auto 已回退 Node 直连：' + (avail.reason || '浏览器不可用') +
+        (avail.path ? '（' + avail.path + '）' : ''),
+    );
+  }
+  return _resolved;
 }
 
 const lastSentAt = new Map(); // accountId -> 上一次请求「开始」时间
@@ -132,11 +166,24 @@ export class DeepSeekHttp {
 
   /** 传输层自检：能不能用（设置页会显示结果，不静默降级） */
   async transportStatus() {
-    const mode = transportMode();
-    if (mode === 'node') return { mode, ok: true, browser: '', note: 'Node 直连（高级选项，TLS 指纹可被识破）' };
-    const bin = this.browser.browserPath;
-    if (!bin) return { mode, ok: false, browser: '', note: '没找到 Chrome / Edge / Chromium' };
-    return { mode, ok: true, browser: bin, note: '浏览器传输（请求与 PoW 都在真实页面里）' };
+    const configured = configuredTransport();
+    const avail = await browserAvailability();
+    const mode = configured === 'node' ? 'node' : configured === 'browser' ? 'browser' : avail.ok ? 'browser' : 'node';
+    return {
+      configured,
+      mode,
+      ok: mode === 'node' ? true : avail.ok,
+      browser: avail.path || '',
+      version: avail.version || '',
+      reason: avail.reason || '',
+      fallback: configured === 'auto' && !avail.ok,
+      note:
+        mode === 'node'
+          ? configured === 'auto'
+            ? 'Node 直连（auto 回退：浏览器起不来，TLS 指纹可被识破，风险更高）'
+            : 'Node 直连（高级选项，TLS 指纹可被识破）'
+          : '浏览器传输（请求与 PoW 都在真实页面里）',
+    };
   }
 
   async screenshot() {
@@ -358,7 +405,7 @@ export class DeepSeekHttp {
   }
 
   async _chatOnce(args) {
-    if (transportMode() === 'browser') return this._chatOnceBrowser(args);
+    if ((await resolveTransport()) === 'browser') return this._chatOnceBrowser(args);
     return this._chatOnceNode(args);
   }
 
@@ -370,7 +417,7 @@ export class DeepSeekHttp {
       await this.browser.installSession(token, cookie, deviceId());
     } catch (e) {
       throw new UpstreamError(
-        '浏览器传输不可用：' + String(e.message || e) + '（去「运行设置 → 高级选项（高危）」切回 Node 直连，或装一个 Chrome / Edge）',
+        '浏览器传输不可用：' + String(e.message || e) + '（去「运行设置 → 传输层」切到 Node 直连（高危），或装一个能跑的 Chrome / Edge）',
         { kind: 'upstream', code: 'BROWSER_UNAVAILABLE' },
       );
     }
@@ -379,7 +426,7 @@ export class DeepSeekHttp {
       pow = await this.browser.powHeader(token, cookie, targetPath);
     } catch (e) {
       throw new UpstreamError(
-        '浏览器传输不可用（PoW 没解出来）：' + String(e.message || e) + '（去「运行设置 → 高级选项（高危）」切回 Node 直连）',
+        '浏览器传输不可用（PoW 没解出来）：' + String(e.message || e) + '（去「运行设置 → 传输层」切到 Node 直连（高危））',
         { kind: 'upstream', code: 'BROWSER_POW_FAILED' },
       );
     }

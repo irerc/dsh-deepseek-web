@@ -13,7 +13,11 @@ export const STATE_DIR =
 const LEGACY_STATE_DIR = path.join(PKG_ROOT, 'state');
 export const CONFIG_FILE = path.join(STATE_DIR, 'config.json');
 
+// 配置版本：用于一次性迁移（v1 = 1.0.56 及以前，transport 默认 browser；v2 = 1.0.57 起默认 auto）
+export const CONFIG_VERSION = 2;
+
 export const DEFAULTS = {
+  configVersion: CONFIG_VERSION,
   autoStart: true, // 首次调用时自动拉起引擎
   idleStopMs: 10 * 60 * 1000, // 空闲多久关停引擎
   // 同一账号两次请求的间隔：**随机区间**（min~max）。固定间隔方差≈0，统计上就是「定时器特征」，
@@ -24,8 +28,11 @@ export const DEFAULTS = {
   requestMode: 'raw',
   // 传输层：browser 走真实 Chromium 页面发请求（TLS/JA4 指纹 = 浏览器，PoW 也在页面里解）
   //         node 直连（旧实现，Node 的 TLS 指纹能被判成非浏览器；B 站/风控侧更易识别）
-  // 参考实现 0.7.0 起把浏览器列为**破坏性变更的默认**：找不到浏览器时明确报错，不静默退回 Node。
-  transport: 'browser',
+  // 参考实现 0.7.0 起把浏览器列为**破坏性变更的默认**：auto = 优先真实浏览器，起不来才退回 Node（并在设置页亮红字）。
+  // 想强制「没浏览器就报错、不许回退」选 browser；想彻底用旧实现选 node。
+  transport: 'auto',
+  // 自定义浏览器可执行文件路径（自动探测找不到、或想指定某个版本时填）。空 = 自动探测。
+  browserPath: '',
   maxConcurrency: 4, // 全局并发上限
   // 同一账号并发：强制 1。参考实现实测「双窗口并发 6 分钟内被限流 1 天」——
   // 这是所有封号原因里最硬的一条，不给用户调大的口子。
@@ -104,6 +111,16 @@ export function loadConfig() {
     saved = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
   } catch {}
   const cfg = { ...DEFAULTS, ...saved };
+  // 迁移：1.0.56 及以前 transport 的默认值就是 'browser'，没法区分「用户主动选的」还是「默认值」。
+  // 统一迁到 auto（优先浏览器、起不来才回退 Node 并亮红字）——用户仍可在设置页一键改回强制 browser。
+  if (saved.configVersion === undefined) {
+    if (cfg.transport === 'browser') cfg.transport = 'auto';
+    cfg.configVersion = CONFIG_VERSION;
+    try {
+      const merged = { ...DEFAULTS, ...saved, transport: cfg.transport, configVersion: CONFIG_VERSION };
+      fs.writeFileSync(CONFIG_FILE, JSON.stringify(merged, null, 2), { mode: 0o600 });
+    } catch {}
+  }
   cfg.sectionOrder = normalizeSectionOrder(cfg.sectionOrder);
   if (process.env.DS_SEND_GAP_MS) cfg.sendGapMs = Number(process.env.DS_SEND_GAP_MS);
   if (process.env.DS_SEND_GAP_MAX_MS) cfg.sendGapMaxMs = Number(process.env.DS_SEND_GAP_MAX_MS);
@@ -112,6 +129,7 @@ export function loadConfig() {
   if (process.env.DS_MAX_CONCURRENCY) cfg.maxConcurrency = Number(process.env.DS_MAX_CONCURRENCY);
   if (process.env.DS_REQUEST_MODE) cfg.requestMode = String(process.env.DS_REQUEST_MODE);
   if (process.env.DS_NETWORK_TRANSPORT) cfg.transport = String(process.env.DS_NETWORK_TRANSPORT);
+  if (process.env.DS_BROWSER_PATH) cfg.browserPath = String(process.env.DS_BROWSER_PATH);
   if (process.env.DS_AUTO_SWITCH === '1') cfg.autoSwitch = true;
   if (process.env.DS_AUTO_SWITCH === '0') cfg.autoSwitch = false;
   return cfg;
@@ -140,7 +158,8 @@ export function saveConfig(patch) {
   clean.rateWindowMs = Math.max(60000, Math.min(12 * 3600 * 1000, Number(clean.rateWindowMs) || DEFAULTS.rateWindowMs));
   clean.rateMaxInWindow = Math.max(0, Math.min(600, Number(clean.rateMaxInWindow) || 0));
   clean.requestMode = ['raw', 'safe'].includes(clean.requestMode) ? clean.requestMode : 'raw';
-  clean.transport = ['browser', 'node'].includes(clean.transport) ? clean.transport : 'browser';
+  clean.transport = ['auto', 'browser', 'node'].includes(clean.transport) ? clean.transport : 'auto';
+  clean.browserPath = String(clean.browserPath || '').trim().slice(0, 300);
   clean.idleStopMs = Math.max(60000, Math.min(24 * 3600 * 1000, Number(clean.idleStopMs) || DEFAULTS.idleStopMs));
   clean.maxConcurrency = Math.max(1, Math.min(16, Number(clean.maxConcurrency) || DEFAULTS.maxConcurrency));
   clean.perAccountConcurrency = 1;

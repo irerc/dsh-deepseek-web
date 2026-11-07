@@ -10,54 +10,222 @@
 //   4) 任何一步超时都要能自己收尸，不留僵尸 chromium。
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { STATE_DIR } from './config.mjs';
+import { STATE_DIR, loadConfig } from './config.mjs';
 import { UA, BASE } from './http.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const WASM_FILE = path.join(HERE, 'sha3_wasm_bg.wasm');
 
-/** 常见浏览器位置；DSW_BROWSER_PATH 可强制指定 */
-export function browserCandidates() {
-  const env = process.env.DSW_BROWSER_PATH;
+/** PATH 里按名字找（不写死 /usr/bin：brew、nix、自编译都可能装在别处） */
+function lookPath(names) {
   const out = [];
-  if (env) out.push(env);
-  if (process.platform === 'win32') {
-    for (const base of [process.env['PROGRAMFILES'], process.env['PROGRAMFILES(X86)'], process.env.LOCALAPPDATA]) {
-      if (!base) continue;
-      out.push(path.join(base, 'Google/Chrome/Application/chrome.exe'));
-      out.push(path.join(base, 'Microsoft/Edge/Application/msedge.exe'));
-      out.push(path.join(base, 'Chromium/Application/chrome.exe'));
+  const dirs = String(process.env.PATH || '').split(path.delimiter).filter(Boolean);
+  for (const n of names) for (const d of dirs) out.push(path.join(d, n));
+  return out;
+}
+
+// Playwright / Puppeteer 自带的 Chromium：很多人（包括这台机器）的浏览器就在这些缓存里，
+// /usr/bin/chromium 常常只是软链到 ms-playwright 缓存 —— 只扫 /usr/bin 会「明明有浏览器却说没检测到」。
+function scanBrowserCaches(home) {
+  const out = [];
+  const pwRoots = [process.env.PLAYWRIGHT_BROWSERS_PATH, path.join(home, '.cache', 'ms-playwright')].filter(Boolean);
+  for (const base of pwRoots) {
+    let dirs = [];
+    try { dirs = fs.readdirSync(base); } catch { continue; }
+    for (const d of dirs) {
+      if (!/^chromium/i.test(d)) continue;
+      const root = path.join(base, d);
+      let subs = [];
+      try { subs = fs.readdirSync(root); } catch { continue; }
+      for (const s of subs) {
+        out.push(path.join(root, s, 'chrome'));
+        out.push(path.join(root, s, 'chrome-headless-shell'));
+        out.push(path.join(root, s, 'headless_shell'));
+      }
     }
-  } else if (process.platform === 'darwin') {
-    out.push(
-      '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-      '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
-      '/Applications/Chromium.app/Contents/MacOS/Chromium',
-    );
-  } else {
-    out.push(
-      '/usr/bin/google-chrome',
-      '/usr/bin/google-chrome-stable',
-      '/usr/bin/chromium',
-      '/usr/bin/chromium-browser',
-      '/usr/bin/microsoft-edge',
-      '/usr/bin/microsoft-edge-stable',
-      '/snap/bin/chromium',
-    );
+  }
+  const ppRoot = path.join(home, '.cache', 'puppeteer');
+  for (const kind of ['chrome', 'chrome-headless-shell']) {
+    const base = path.join(ppRoot, kind);
+    let vers = [];
+    try { vers = fs.readdirSync(base); } catch { continue; }
+    for (const v of vers) {
+      let subs = [];
+      try { subs = fs.readdirSync(path.join(base, v)); } catch { continue; }
+      for (const s of subs) {
+        out.push(path.join(base, v, s, 'chrome'));
+        out.push(path.join(base, v, s, 'chrome-headless-shell'));
+        out.push(path.join(base, v, s, 'headless_shell'));
+      }
+    }
   }
   return out;
 }
 
+/** 候选浏览器路径：DSW_BROWSER_PATH > 设置里的自定义路径 > PATH > 发行版常见位置 > Playwright/Puppeteer 缓存 */
+export function browserCandidates() {
+  const out = [];
+  const push = (p) => { if (p) out.push(String(p)); };
+  push(process.env.DSW_BROWSER_PATH);
+  try {
+    const custom = loadConfig().browserPath;
+    if (custom) push(custom);
+  } catch {}
+  const home = os.homedir();
+  if (process.platform === 'win32') {
+    for (const base of [process.env['PROGRAMFILES'], process.env['PROGRAMFILES(X86)'], process.env.LOCALAPPDATA]) {
+      if (!base) continue;
+      push(path.join(base, 'Google/Chrome/Application/chrome.exe'));
+      push(path.join(base, 'Microsoft/Edge/Application/msedge.exe'));
+      push(path.join(base, 'Chromium/Application/chrome.exe'));
+    }
+  } else if (process.platform === 'darwin') {
+    push('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome');
+    push('/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge');
+    push('/Applications/Chromium.app/Contents/MacOS/Chromium');
+  } else {
+    const names = [
+      'google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser',
+      'microsoft-edge', 'microsoft-edge-stable', 'brave-browser', 'vivaldi-stable',
+    ];
+    for (const p of lookPath(names)) push(p);
+    push('/opt/google/chrome/chrome');
+    push('/opt/microsoft/msedge/msedge');
+    push('/usr/lib/chromium/chrome');
+    push('/usr/lib/chromium-browser/chrome');
+    push('/snap/bin/chromium');
+    push('/var/lib/flatpak/exports/bin/com.google.Chrome');
+    push(path.join(home, '.local/share/flatpak/exports/bin/com.google.Chrome'));
+  }
+  for (const p of scanBrowserCaches(home)) push(p);
+  return [...new Set(out)];
+}
+
+function isExecutable(p) {
+  try {
+    if (!p || !fs.existsSync(p)) return false;
+    const st = fs.statSync(p);
+    if (!st.isFile()) return false;
+    fs.accessSync(p, fs.constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** 找一个可执行的浏览器；找不到返回 null（调用方必须明确报错，不许静默回退） */
 export function findBrowser() {
-  for (const p of browserCandidates()) {
-    try {
-      if (p && fs.existsSync(p)) return p;
-    } catch {}
-  }
+  for (const p of browserCandidates()) if (isExecutable(p)) return p;
   return null;
+}
+
+/** 读 --version：用来在设置页显示「找到的是哪个浏览器、几版」，而不是只说一句检测不到 */
+export function browserVersionOf(bin) {
+  return new Promise((resolve) => {
+    let out = '';
+    let p;
+    try {
+      p = spawn(bin, ['--version'], { stdio: ['ignore', 'pipe', 'pipe'] });
+    } catch {
+      return resolve('');
+    }
+    const timer = setTimeout(() => { try { p.kill('SIGKILL'); } catch {} resolve(out.trim()); }, 5000);
+    const acc = (d) => { out += String(d); if (out.length > 4000) out = out.slice(0, 4000); };
+    p.stdout.on('data', acc);
+    p.stderr.on('data', acc);
+    p.on('error', () => { clearTimeout(timer); resolve(''); });
+    p.on('exit', () => { clearTimeout(timer); resolve(out.trim().split('\n')[0].slice(0, 120)); });
+  });
+}
+
+// 冒烟测试：真的起一次 headless，让它 dump 一个页面。起不来的浏览器必须在这里露馅
+// （这台机器上的 Chromium 就是活生生的例子：文件在、--version 能打，一开页面就 SIGTRAP）。
+function smokeTest(bin) {
+  return new Promise((resolve) => {
+    let dir = '';
+    try { dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsw-smoke-')); } catch { dir = ''; }
+    const args = ['--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage', '--no-first-run', '--no-default-browser-check'];
+    if (!/headless/i.test(path.basename(bin))) args.unshift('--headless=new');
+    if (dir) args.push('--user-data-dir=' + path.join(dir, 'p'));
+    args.push('--dump-dom', 'about:blank');
+    const t0 = Date.now();
+    let out = '';
+    let err = '';
+    let done = false;
+    let p;
+    const finish = (r) => {
+      if (done) return;
+      done = true;
+      try { p.kill('SIGKILL'); } catch {}
+      if (dir) { try { fs.rmSync(dir, { recursive: true, force: true }); } catch {} }
+      resolve({ ...r, ms: Date.now() - t0 });
+    };
+    try {
+      p = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    } catch (e) {
+      return resolve({ ok: false, reason: '无法启动：' + String(e.message || e), ms: Date.now() - t0 });
+    }
+    const timer = setTimeout(() => finish({ ok: false, reason: '12 秒内没有正常退出（启动卡死）' }), 12000);
+    p.stdout.on('data', (d) => { out += String(d); if (out.length > 200000) out = out.slice(0, 200000); });
+    p.stderr.on('data', (d) => { err += String(d); if (err.length > 20000) err = err.slice(-20000); });
+    p.on('error', (e) => { clearTimeout(timer); finish({ ok: false, reason: '无法启动：' + String(e.message || e) }); });
+    p.on('exit', (code, signal) => {
+      clearTimeout(timer);
+      if (code === 0 && /<html/i.test(out)) return finish({ ok: true, code: 0 });
+      const tail = (err || out).split('\n').map((s) => s.trim()).filter(Boolean).slice(-3).join(' | ').slice(0, 500);
+      finish({
+        ok: false,
+        code,
+        signal: signal || '',
+        reason: signal
+          ? '一开页面就崩溃（信号 ' + signal + '，退出码 ' + code + '）'
+          : '启动失败（退出码 ' + code + '）',
+        tail,
+      });
+    });
+  });
+}
+
+const AVAIL_TTL = 5 * 60 * 1000;
+let _avail = { at: 0, value: null };
+
+/** 浏览器可用性（带缓存）：找到没有、叫什么版本、**能不能真的启动**。设置页和引擎都读这一份 */
+export async function browserAvailability({ force = false, bin = '' } = {}) {
+  const now = Date.now();
+  if (!force && !bin && _avail.value && now - _avail.at < AVAIL_TTL) return _avail.value;
+  const explicit = String(bin || '').trim();
+  const pathFound = explicit ? (isExecutable(explicit) ? explicit : '') : findBrowser();
+  let value;
+  if (!pathFound) {
+    value = {
+      ok: false,
+      found: false,
+      path: '',
+      version: '',
+      reason: explicit
+        ? '指定的浏览器路径不存在或不可执行：' + explicit
+        : '没找到 Chrome / Edge / Chromium 可执行文件（PATH、/opt、snap、flatpak、Playwright/Puppeteer 缓存都没命中）',
+    };
+  } else {
+    const version = await browserVersionOf(pathFound);
+    const s = await smokeTest(pathFound);
+    value = {
+      ok: Boolean(s.ok),
+      found: true,
+      path: pathFound,
+      version,
+      reason: s.ok ? '' : String(s.reason || '启动失败'),
+      signal: s.signal || '',
+      code: s.code === undefined ? null : s.code,
+      tail: s.tail || '',
+      ms: s.ms || 0,
+    };
+  }
+  if (!bin) _avail = { at: now, value };
+  return value;
 }
 
 function sleep(ms) {
@@ -173,12 +341,23 @@ export class BrowserTransport {
   }
 
   async _launch() {
-    const bin = this.browserPath;
+    const avail = await browserAvailability();
+    const bin = avail.path || this.browserPath;
     if (!bin) {
       throw new Error(
         '浏览器传输需要本机有 Chrome / Edge / Chromium，但没找到可执行文件。' +
-          '装一个浏览器，或设置 DSW_BROWSER_PATH 指向它；' +
-          '也可以到「运行设置 → 高级选项（高危）」切回 Node 直连。',
+          '装一个浏览器，或在「运行设置 → 传输层」里填浏览器路径（也支持 DSW_BROWSER_PATH）；' +
+          '也可以到「运行设置 → 传输层」切到 Node 直连（高危）。',
+      );
+    }
+    // 找到了 ≠ 能用：先做一次冒烟启动，起不来就立刻给出真实原因（信号/退出码/最后几行日志），
+    // 而不是等到 25 秒超时再报「DevTools 端口未就绪」。
+    if (!avail.ok) {
+      throw new Error(
+        '浏览器找到了但起不来：' + bin + (avail.version ? '（' + avail.version + '）' : '') +
+          ' —— ' + (avail.reason || '启动失败') +
+          (avail.tail ? '；日志：' + avail.tail.slice(0, 200) : '') +
+          '。这是运行环境限制，不是插件配置问题；可到「运行设置 → 传输层」切到 Node 直连（高危），或换一台能跑浏览器的机器。',
       );
     }
     const profile = path.join(STATE_DIR, 'browser-profile');
@@ -227,12 +406,12 @@ export class BrowserTransport {
       } catch {}
       if (this.proc === null) {
         throw new Error('浏览器启动后立刻退出（详见状态目录 browser.log）；浏览器传输不可用。' +
-          '可到「运行设置 → 高级选项（高危）」切回 Node 直连。');
+          '可到「运行设置 → 传输层」切到 Node 直连（高危），或换一台能跑浏览器的机器。');
       }
       if (Date.now() > deadline) {
         this.kill();
         throw new Error('浏览器 DevTools 端口 25 秒未就绪；浏览器传输不可用。' +
-          '可到「运行设置 → 高级选项（高危）」切回 Node 直连。');
+          '可到「运行设置 → 传输层」切到 Node 直连（高危），或换一台能跑浏览器的机器。');
       }
       await sleep(250);
     }
