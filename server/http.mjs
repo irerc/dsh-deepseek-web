@@ -131,6 +131,13 @@ export function classify(result, what = '上游') {
   if (result.status === 429 || code === 40029 || /过于频繁|太频繁|操作频繁|too\s+many\s+requests|rate\s*limit|稍后重试/i.test(msg)) {
     return new UpstreamError(`${what}被限流：${msg}`, { status: result.status || 429, code: String(code || ''), kind: 'rate' });
   }
+  // 数美人机验证：站点不报错，只回一个挑战。当成「空回复」处理会让人误以为是插件坏了。
+  if (code === 40303 || /CHALLENGE_REQUIRED/i.test(msg)) {
+    return new UpstreamError(
+      `${what}要求人机验证（数美）：在「登录」页用真实浏览器完成一次空间点选，或等 10~30 分钟冷却，插件会自动恢复。`,
+      { status: result.status, code: '40303', kind: 'challenge' },
+    );
+  }
   if (result.status >= 500) {
     return new UpstreamError(`${what}服务异常（${result.status}）：${msg}`, { status: result.status, kind: 'upstream' });
   }

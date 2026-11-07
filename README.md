@@ -35,7 +35,7 @@ git+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web.git
 **② 发行版压缩包（镜像，最快）**
 
 ```
-https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.70/dsh-deepseek-web-1.0.70.tgz
+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.71/dsh-deepseek-web-1.0.71.tgz
 ```
 
 **③ 仓库页（镜像浏览）**
@@ -47,7 +47,7 @@ https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web
 > 镜像不可用时，把上面链接里的 `https://gh-proxy.com/` 去掉即可直连 GitHub（官方速度可能较慢）：
 >
 > - 插件 spec：`https://github.com/irerc/dsh-deepseek-web`
-> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.70/dsh-deepseek-web-1.0.70.tgz`
+> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.71/dsh-deepseek-web-1.0.71.tgz`
 
 **不需要任何 API key**：插件自带 provider 配置与本地网关（`127.0.0.1:18081`），装好即用。
 
@@ -340,6 +340,23 @@ bin/cli.mjs           login/accounts/start/stop/status/doctor
 MIT License
 
 ## 更新日志
+
+### v1.0.71
+**「模型返回空」其实是被要求做人机验证**
+
+排查到你截图里那句 `returned a completed response with no content` 的真正来源：站点根本不回正文，只回
+
+```json
+{"code":40303,"msg":"CHALLENGE_REQUIRED","data":{"provider":"shumei","extras":{"expected_mode":"spatial_select"}}}
+```
+
+边界情况：这个 JSON **没有 SSE 空行**，以前只按 `\n\n` 切块的循环根本看不到它，于是变成「空回复」→ 重试 3 次 → 前端报 no content。用户看到的是「插件坏了」，实际是风控要你点一次空间选择。
+
+| 以前 | 现在 |
+|---|---|
+| 空回复 × 3 次重试，最后 `no content` | 直接翻成人话，**不重试** |
+| 报错看不出要做什么 | 「在『登录』页用真实浏览器完成一次验证」 |
+| 每发一条都继续撞站点 | 挑战后**冷却 5 分钟**，冷却期内本地直接拒绝（撞一次只会拖长冷却） |
 
 ### v1.0.70
 **第一条消息不再等了，整轮也不再被「假打字」拖慢**

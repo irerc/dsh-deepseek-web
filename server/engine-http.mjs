@@ -515,6 +515,14 @@ export class DeepSeekHttp {
    */
   async chat({ prompt, thinking = false, sessionId = null, parentId = null, onDelta, idleMs = 180000, preferAccount = null, typedChars = 0 }) {
     const cfg = loadConfig();
+    // 挑战冷却期内直接说清楚，不再去撞站点（撞一次只会让挑战更久）
+    if (this._challengeUntil && Date.now() < this._challengeUntil) {
+      const left = Math.max(1, Math.ceil((this._challengeUntil - Date.now()) / 60000));
+      throw new UpstreamError(
+        '站点要求人机验证（数美空间点选）：在「登录」页用真实浏览器完成一次验证即可恢复，还剩 ' + left + ' 分钟冷却（这段时间内重复发送只会延长冷却）。',
+        { kind: 'challenge', code: '40303' },
+      );
+    }
     // 新账号的「先闲聊两句」从关键路径移走：以前是 await，第一条消息要等两句闲聊 + 节律，
     // 重启后第一条能慢到一分钟。现在改成空闲后台补，用户那句永远先发出去。
     if (cfg.warmup) this._warmupWhenIdle(preferAccount);
@@ -545,6 +553,13 @@ export class DeepSeekHttp {
       } catch (error) {
         lastError = error;
         this.lastError = error;
+        // 验证/限流/禁言这类「站点明确说了不行」的，重试只是继续撞墙，直接把原话交给用户
+        if (error.kind === 'challenge') {
+          // 冷却 5 分钟：挑战期间再撞只会让风控更确信「这不是人」，也会拖长冷却
+          this._challengeUntil = Date.now() + 5 * 60_000;
+          throw error;
+        }
+        if (error.kind === 'budget') throw error;
         if (error.kind === 'auth') {
           const who = account.label + (account.email ? '（' + account.email + '）' : '') + ' ' + account.id;
           // 「登录态失效」不一定是真的：WAF 拦截页（202 HTML）、限流、网络抖动同样不是 200。
@@ -704,6 +719,34 @@ export class DeepSeekHttp {
     const reader = res.body.getReader();
     const dec = new TextDecoder();
     let buf = '';
+    // 站点拒绝时不回正文，只回一个业务码。三种「明确说了不行」的一律翻成人话抛出，
+    // 且共用一份判断：循环里和收尾都要查（挑战 JSON 常常是「没有空行」的一整块）。
+    const guardBlock = (block) => {
+      // 数美验证：{"code":40303,"msg":"CHALLENGE_REQUIRED"}。以前被当成「空回复」重试三次，
+      // 用户只看到「模型返回空」，完全不知道要去做人机验证。重试等于继续撞风控，直接抛。
+      if (/CHALLENGE_REQUIRED|"code"\s*:\s*40303/.test(block)) {
+        throw new UpstreamError(
+          '站点要求人机验证（数美空间点选）：这不是登录失效，是风控让你证明一次是真人。' +
+            '在「登录」页用真实浏览器完成一次验证（或等 10~30 分钟冷却），插件会自动恢复，不用换号、不用改配置。',
+          { kind: 'challenge', code: '40303' },
+        );
+      }
+      if (rateLimitErrorFrom(block)) {
+        throw new UpstreamError('账号被站点限流：' + String(block).slice(0, 160), { kind: 'rate', code: '40029' });
+      }
+      const muted = muteErrorFrom(block);
+      if (muted) {
+        throw new UpstreamError(
+          (muted.banned ? '账号已被站点停用' : '账号被站点禁言') + (muted.message ? '：' + muted.message : ''),
+          {
+            kind: muted.banned ? 'banned' : 'mute',
+            code: muted.banned ? '40012' : '50006',
+            untilMs: muted.untilMs,
+            reason: muted.message || '',
+          },
+        );
+      }
+    };
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
@@ -713,25 +756,14 @@ export class DeepSeekHttp {
       while ((idx = buf.indexOf('\n\n')) >= 0) {
         const block = buf.slice(0, idx);
         buf = buf.slice(idx + 2);
-        if (rateLimitErrorFrom(block)) {
-          throw new UpstreamError('账号被站点限流：' + String(block).slice(0, 160), { kind: 'rate', code: '40029' });
-        }
-        const muted = muteErrorFrom(block);
-        if (muted) {
-          throw new UpstreamError(
-            (muted.banned ? '账号已被站点停用' : '账号被站点禁言') + (muted.message ? '：' + muted.message : ''),
-            {
-              kind: muted.banned ? 'banned' : 'mute',
-              code: muted.banned ? '40012' : '50006',
-              untilMs: muted.untilMs,
-              reason: muted.message || '',
-            },
-          );
-        }
+        guardBlock(block);
         if (block.trim() && onDelta) onDelta(block);
       }
     }
-    if (buf.trim() && onDelta) onDelta(buf);
+    if (buf.trim()) {
+      guardBlock(buf);
+      if (onDelta) onDelta(buf);
+    }
   }
 
   /** native 传输：请求由 curl_cffi（Chrome 级 TLS/H2）发出，PoW 仍用官方 wasm 本地算 */
