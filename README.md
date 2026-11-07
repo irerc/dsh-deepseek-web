@@ -35,7 +35,7 @@ git+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web.git
 **② 发行版压缩包（镜像，最快）**
 
 ```
-https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.67/dsh-deepseek-web-1.0.67.tgz
+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.68/dsh-deepseek-web-1.0.68.tgz
 ```
 
 **③ 仓库页（镜像浏览）**
@@ -47,7 +47,7 @@ https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web
 > 镜像不可用时，把上面链接里的 `https://gh-proxy.com/` 去掉即可直连 GitHub（官方速度可能较慢）：
 >
 > - 插件 spec：`https://github.com/irerc/dsh-deepseek-web`
-> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.67/dsh-deepseek-web-1.0.67.tgz`
+> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.68/dsh-deepseek-web-1.0.68.tgz`
 
 **不需要任何 API key**：插件自带 provider 配置与本地网关（`127.0.0.1:18081`），装好即用。
 
@@ -340,6 +340,18 @@ bin/cli.mjs           login/accounts/start/stop/status/doctor
 MIT License
 
 ## 更新日志
+
+### v1.0.68
+**「浏览器」这一档不再假装可用**
+
+现象：传输层选了「浏览器」，界面写着「当前：真实浏览器 · /usr/bin/chromium」，下面却报 SIGTRAP、退出码 null。看着像「配好了却不工作」，实际是这一档在本机永远起不来（容器缺 dbus、`/dev/shm` 不可写、GL 初始化失败——`--headless=old`、`--single-process`、`--use-angle=swiftshader` 全部同样崩）。
+
+改动：
+- 探测失败时按钮直接标成 `浏览器（本机不可用）`，并降低透明度，鼠标悬停给出原因；
+- 「当前：…」那行补一句 `（这一档在本机起不来：「自动」会跳过它落到本地伪装）`，不再让人以为它已经配好；
+- 按钮仍可点（需要看日志时用），只是不再误导。
+
+真要用真浏览器，请选「手机浏览器」——它接管的是你手机上那台 Chrome，不是容器里的 Chromium。前提是 `adb forward tcp:9222 localabstract:chrome_devtools_remote`（Termux 里跑，见 v1.0.66 说明）。
 
 ### v1.0.67
 **流式真的流起来了：JSON 信封边收边解，不再等整段回复**
