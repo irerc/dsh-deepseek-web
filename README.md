@@ -35,7 +35,7 @@ git+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web.git
 **② 发行版压缩包（镜像，最快）**
 
 ```
-https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.74/dsh-deepseek-web-1.0.74.tgz
+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.75/dsh-deepseek-web-1.0.75.tgz
 ```
 
 **③ 仓库页（镜像浏览）**
@@ -47,7 +47,7 @@ https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web
 > 镜像不可用时，把上面链接里的 `https://gh-proxy.com/` 去掉即可直连 GitHub（官方速度可能较慢）：
 >
 > - 插件 spec：`https://github.com/irerc/dsh-deepseek-web`
-> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.74/dsh-deepseek-web-1.0.74.tgz`
+> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.75/dsh-deepseek-web-1.0.75.tgz`
 
 **不需要任何 API key**：插件自带 provider 配置与本地网关（`127.0.0.1:18081`），装好即用。
 
@@ -340,6 +340,17 @@ bin/cli.mjs           login/accounts/start/stop/status/doctor
 MIT License
 
 ## 更新日志
+
+### v1.0.75
+**所有登录动作默认拉起浏览器**
+
+| 入口 | 以前 | 现在 |
+|---|---|---|
+| 登录 Tab 主按钮 | 内嵌窗口 | **登录（打开浏览器）** |
+| 账号卡片「重新登录」 | 内嵌窗口 | 浏览器登录 |
+| 「更多」里的登录按钮 | 内嵌登录 | **登录（浏览器）** |
+
+内嵌窗口只作为兜底：浏览器那条调不起来（接口报错 / 宿主拦 window.open 且地址也打不开）才自动切回内嵌，并明确提示。
 
 ### v1.0.74
 **「重新登录」默认走浏览器登录**
