@@ -35,7 +35,7 @@ git+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web.git
 **② 发行版压缩包（镜像，最快）**
 
 ```
-https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.58/dsh-deepseek-web-1.0.58.tgz
+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.59/dsh-deepseek-web-1.0.59.tgz
 ```
 
 **③ 仓库页（镜像浏览）**
@@ -47,7 +47,7 @@ https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web
 > 镜像不可用时，把上面链接里的 `https://gh-proxy.com/` 去掉即可直连 GitHub（官方速度可能较慢）：
 >
 > - 插件 spec：`https://github.com/irerc/dsh-deepseek-web`
-> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.58/dsh-deepseek-web-1.0.58.tgz`
+> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.59/dsh-deepseek-web-1.0.59.tgz`
 
 **不需要任何 API key**：插件自带 provider 配置与本地网关（`127.0.0.1:18081`），装好即用。
 
@@ -303,6 +303,13 @@ bin/cli.mjs           login/accounts/start/stop/status/doctor
 MIT License
 
 ## 更新日志
+
+### v1.0.59
+**界面简化为「一个档位 + 一个按钮」**
+- 传输层主界面从 4 个按钮 + 2 行检测 + 3 条红字警告，收敛成：`自动`／`浏览器` 两个档位 + 一个「检测连接」+ 一行「当前：本地伪装 · python3 · curl_cffi 0.17.0」。
+- 「检测连接」按当前生效档位自动选路（浏览器→测浏览器，本地伪装→测 JA4），不再需要记两个按钮的区别。
+- `Node 直连`、浏览器路径、Python 路径、自动换号全部收进「高级选项（高危）」——旧实现仍在，但默认不可见。
+- 红字警告去重：只有真正降级到 Node 时才提示（并给出一步修复路径），「浏览器起不来」只在强制浏览器档下单独提示。
 
 ### v1.0.58
 
