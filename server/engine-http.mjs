@@ -77,17 +77,48 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-/** 从上游返回块里认出「禁言 / 封号」：50006 MUTED、40012 USER_IS_BANNED（站点错误码） */
+/** 把 JSON 字符串里的 \\uXXXX 还原成中文（站点有时会转义） */
+function decodeJsonEscapes(text) {
+  return String(text || '').replace(/\\u([0-9a-fA-F]{4})/g, (_, h) => String.fromCharCode(parseInt(h, 16)));
+}
+
+/** 站点中文文案里的到期时间：「禁言至 2027 年 11 月 2 日 09:15」 */
+function untilFromChineseDate(text) {
+  const m = /(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日\s*(\d{1,2})\s*[:：]\s*(\d{1,2})/.exec(text);
+  if (!m) return 0;
+  // 站点文案里的时间是北京时间（UTC+8），不能按本机时区解释：
+  // 容器里 TZ=UTC 时直接 new Date(y,m,d,...) 会把「09:15」当成 09:15Z，比真实到期晚 8 小时。
+  const t = Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]), Number(m[4]), Number(m[5]), 0, 0) - 8 * 3600 * 1000;
+  return Number.isFinite(t) ? t : 0;
+}
+
+/**
+ * 从上游返回块里认出「禁言 / 封号」：50006 MUTED、40012 USER_IS_BANNED（站点错误码）。
+ * 同时把站点**原文**和中文日期里的到期时间捞出来 —— 只显示「账号被禁言」：
+ * 用户既不知道封了多久、也不知道为什么，只会反复重试把账号越推越深。
+ */
 export function muteErrorFrom(text) {
-  if (!/"code"\s*:\s*50006|"biz_code"\s*:\s*50006/.test(text) && !/"code"\s*:\s*40012|"biz_code"\s*:\s*40012/.test(text)) return null;
-  const banned = /"code"\s*:\s*40012|"biz_code"\s*:\s*40012/.test(text);
-  const m = /"end_at"\s*:\s*(\d{9,13})/.exec(text) || /"mute_until"\s*:\s*(\d{9,13})/.exec(text);
+  const raw = String(text || '');
+  if (!/"code"\s*:\s*50006|"biz_code"\s*:\s*50006/.test(raw) && !/"code"\s*:\s*40012|"biz_code"\s*:\s*40012/.test(raw)) return null;
+  const banned = /"code"\s*:\s*40012|"biz_code"\s*:\s*40012/.test(raw);
+  const decoded = decodeJsonEscapes(raw);
+  const m = /"end_at"\s*:\s*(\d{9,13})/.exec(raw) || /"mute_until"\s*:\s*(\d{9,13})/.exec(raw);
   let untilMs = 0;
   if (m) {
     const n = Number(m[1]);
     untilMs = n > 1e12 ? n : n * 1000;
   }
-  return { banned, untilMs };
+  if (!untilMs) untilMs = untilFromChineseDate(decoded);
+  // 站点原文：优先取 JSON 里的 msg/message 字段，取不到就找含「禁言/封禁/停用/违反」的那句中文
+  let message = '';
+  const field = /"(?:msg|message|error_msg)"\s*:\s*"([^"]{4,300})"/.exec(decoded);
+  if (field) message = field[1];
+  if (!message) {
+    const sent = /[^\n{}"]{0,60}(?:违反[^\n{}"]{0,40}禁言|已被禁言|已被封禁|账号已被停用)[^\n{}"]{0,120}/.exec(decoded);
+    if (sent) message = sent[0];
+  }
+  message = message.replace(/\\n/g, ' ').trim().slice(0, 200);
+  return { banned, untilMs, message };
 }
 
 /** 从 SSE 块里认出「被限流」：业务码 40029 或站点那句「操作过于频繁」 */
@@ -462,7 +493,7 @@ export class DeepSeekHttp {
         if (error.kind === 'mute' || error.kind === 'banned') {
           // 站点禁言/封号：账号本身还登着，但不能发消息。记下来，到期前不再用它，换下一个账号。
           const until = error.untilMs || 0;
-          markMuted(account.id, until, { banned: error.kind === 'banned', reason: error.message });
+          markMuted(account.id, until, { banned: error.kind === 'banned', reason: error.reason || error.message });
           const when = until ? new Date(until).toLocaleString('zh-CN') : '（站点未给到期时间）';
           this.log(`[chat] 账号 ${account.label} ${error.kind === 'banned' ? '已被停用' : '被禁言'}：${when}，切换下一个`);
           continue;
@@ -508,11 +539,15 @@ export class DeepSeekHttp {
         }
         const muted = muteErrorFrom(block);
         if (muted) {
-          throw new UpstreamError(muted.banned ? '账号已被站点停用' : '账号被站点禁言', {
-            kind: muted.banned ? 'banned' : 'mute',
-            code: muted.banned ? '40012' : '50006',
-            untilMs: muted.untilMs,
-          });
+          throw new UpstreamError(
+            (muted.banned ? '账号已被站点停用' : '账号被站点禁言') + (muted.message ? '：' + muted.message : ''),
+            {
+              kind: muted.banned ? 'banned' : 'mute',
+              code: muted.banned ? '40012' : '50006',
+              untilMs: muted.untilMs,
+              reason: muted.message || '',
+            },
+          );
         }
         if (block.trim() && onDelta) onDelta(block);
       }

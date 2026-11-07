@@ -93,6 +93,8 @@ export function publicAccount(a) {
     // 站点禁言（chat.is_muted / 错误码 50006）：到期前不要拿去发消息
     mutedUntil: a.mutedUntil && a.mutedUntil > now ? a.mutedUntil : null,
     muted: Boolean(a.mutedUntil && a.mutedUntil > now),
+    // 站点原文（「由于违反用户使用规范…禁言至 …」）：只显示「被禁言」用户不知道原因和期限
+    muteReason: a.mutedUntil && a.mutedUntil > now ? String(a.muteReason || '') : '',
     banned: Boolean(a.banned),
     // 凭证来源 / 最近一次登录成功时间（界面「登录状态」用，参考 dsh-deepseek-web-login 的信息卡）
     loginSource: a.loginSource || '',

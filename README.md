@@ -35,7 +35,7 @@ git+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web.git
 **② 发行版压缩包（镜像，最快）**
 
 ```
-https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.60/dsh-deepseek-web-1.0.60.tgz
+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.61/dsh-deepseek-web-1.0.61.tgz
 ```
 
 **③ 仓库页（镜像浏览）**
@@ -47,7 +47,7 @@ https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web
 > 镜像不可用时，把上面链接里的 `https://gh-proxy.com/` 去掉即可直连 GitHub（官方速度可能较慢）：
 >
 > - 插件 spec：`https://github.com/irerc/dsh-deepseek-web`
-> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.60/dsh-deepseek-web-1.0.60.tgz`
+> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.61/dsh-deepseek-web-1.0.61.tgz`
 
 **不需要任何 API key**：插件自带 provider 配置与本地网关（`127.0.0.1:18081`），装好即用。
 
@@ -94,6 +94,14 @@ dsh-deepseek-web doctor
 - 401 → 若该账号保存了密码，先自动重新登录并把新 token 换到原账号（同一账号原地续跑，不打断对话）；没存密码或重登失败才标记「登录失效」。
 - 指定账号：模型名写 `deepseek-chat@工作号` 即可固定到某个账号。
 - **默认不自动换号**：某个号失效/被限流时直接报错停下（旧的自动轮换在「高级选项（高危）」里，默认关）。
+
+### 被禁言了怎么办（以及为什么会到这一步）
+
+站点的处置分两档：`50006` **禁言**（还能登录、不能发消息，有到期时间）和 `40012` **封号**（更重）。到期前插件不会再用这个账号发任何请求，账号行会显示到期时间和站点原文。
+
+必须说清的现实：**用网页版承载「工具调用密集的 agent 循环」本身就是站点禁止的自动化访问**。设置页里能看到 DSH 一轮轮把 `bash` 之类的工具调用塞进网页对话 —— 这在服务端看是「用聊天界面当 API」，比频率更接近「违反使用规范」的判据。指纹、节律、每日上限能降低被统计识别的概率，**改不了一条自动化访问链路的性质**。
+
+真要长期跑工具链，正路是官方 API（`api.deepseek.com`，按量付费、明确允许程序化调用）；网页版这条线适合「人在网页里聊」量的使用。被禁言后：① 到期前别再用这个号；② 需要继续用时换官方 API 的 provider，而不是开小号轮换（多号轮换会把处置扩散到关联账号）。
 
 ## 多设备与设备身份（为什么会被踢下线）
 
@@ -307,6 +315,16 @@ bin/cli.mjs           login/accounts/start/stop/status/doctor
 MIT License
 
 ## 更新日志
+
+### v1.0.61
+**禁言/封禁识别升级：显示站点原文 + 精确到期时间**
+
+之前只报「账号被站点禁言」，用户既不知道封了多久、也不知道为什么 —— 结果就是反复重试，把账号越推越深。这一版：
+
+- 从上游返回里捞出站点**原文**（「由于违反用户使用规范，你的账号已被禁言至 2027 年 11 月 2 日 09:15，如有疑问请联系我们。」），存进账号并显示在账号行，前缀「站点原文：」。
+- 中文日期兜底解析到期时间：「YYYY 年 M 月 D 日 HH:MM」→ 毫秒时间戳；站点没给 `end_at` 时也能算出确切期限。
+- **时区修正**：站点文案是北京时间，之前按本机时区解释，容器里 `TZ=UTC` 时会算成「09:15Z」，比真实到期晚 8 小时。
+- `50006`（禁言）与 `40012`（封号）继续分开：禁言只是不能发消息，别误判成封号去删号。
 
 ### v1.0.60
 **人类节律：把「等距定时器」变成「有作息、要打字、偶尔走神的人」**
