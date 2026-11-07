@@ -519,6 +519,105 @@ try { chatMap = JSON.parse(fs.readFileSync(CHAT_MAP_FILE, 'utf8')); } catch { ch
 function saveChatMap() {
   try { fs.writeFileSync(CHAT_MAP_FILE, JSON.stringify(chatMap)); } catch {}
 }
+/**
+ * 「像人一样」的提示词：不再往聊天框里塞一整段 OpenAI 请求体 JSON，而是把对话写成人和助手的样子。
+ *
+ * 为什么要换：站点看到的是「用户消息」。一条以 {"model":"deepseek-web","messages":[{"role":...
+ * 开头的消息，在任何人眼里都只有一种解释：这是个 API 代理。真正会踩线的不是频率，而是这个形状。
+ *
+ * 这个构造器只做三件事：
+ *   1) 用「我：/你：」的对话体复述历史，run 结果按「（我跑了 bash：…）输出：…」贴回去，并截断；
+ *   2) 工具约定写成一句人话（要跑东西就回一行 JSON），不贴 schema 全文；
+ *   3) 当前这条用户消息放在最后，跟真人打完字就发送一样。
+ */
+const TOOL_OUT_HEAD = Number(process.env.DSW_HUMAN_TOOL_HEAD || 1200);
+const TOOL_OUT_TAIL = Number(process.env.DSW_HUMAN_TOOL_TAIL || 200);
+
+/** 工具输出截断：真人贴日志也会说「后面省略」 */
+function clipToolOutput(text) {
+  const t = String(text || '');
+  if (t.length <= TOOL_OUT_HEAD + TOOL_OUT_TAIL) return t;
+  const omitted = t.length - TOOL_OUT_HEAD - TOOL_OUT_TAIL;
+  return t.slice(0, TOOL_OUT_HEAD) + '\n…（省略 ' + omitted + ' 字）…\n' + t.slice(-TOOL_OUT_TAIL);
+}
+
+/** 工具签名：`bash{command,timeoutMs?}` —— 比 schema 短，但足够拼出合法参数 */
+function toolSignatures(tools = []) {
+  return tools
+    .map((t) => {
+      const f = t?.function || t;
+      if (!f?.name) return null;
+      const schema = f.parameters && typeof f.parameters === 'object' ? f.parameters : {};
+      const required = new Set(Array.isArray(schema.required) ? schema.required : []);
+      const keys = Object.keys(schema.properties || {});
+      const args = keys.slice(0, 6).map((k) => (required.has(k) ? k : k + '?')).join(',');
+      return args ? f.name + '{' + args + '}' : f.name + '{}';
+    })
+    .filter(Boolean)
+    .slice(0, 40);
+}
+
+/**
+ * @param {Array<{role:string, content:any, tool_calls?:any[], tool_call_id?:string}>} list 逻辑消息
+ * @param {Array} tools 工具 schema
+ * @param {{resume?:boolean, skipSystem?:boolean, mode?:string}} opts
+ */
+export function buildHumanPrompt(list, tools, opts = {}) {
+  const reqMode = opts.mode || currentMode();
+  const lim = modeLimits(reqMode);
+  const pick = (v) => sanitizePrompt(cleanHistoryText(typeof v === 'string' ? v : contentToText(v)));
+  const all = (list || []).filter((m) => m && m.role);
+  const sys = all.filter((m) => m.role === 'system' || m.role === 'developer').map((m) => pick(m.content)).filter(Boolean);
+  const convo = all.filter((m) => m.role === 'user' || m.role === 'assistant' || m.role === 'tool');
+  const names = new Map();
+  for (const m of all) if (Array.isArray(m.tool_calls)) for (const tc of m.tool_calls) if (tc?.id) names.set(tc.id, tc.function?.name || tc.name || '工具');
+
+  const lines = [];
+  if (!opts.skipSystem && !opts.resume) {
+    lines.push('接着往下做，不用重新自我介绍。');
+    if (sys.length) lines.push('（我之前的设定：' + sys.join(' ').replace(/\s+/g, ' ').slice(0, 600) + '）');
+    const sigs = toolSignatures(tools);
+    if (sigs.length) {
+      lines.push(
+        '需要我跑命令或读文件时，你就只回一行这样的 JSON，我照做然后把输出贴回来：\n' +
+          '{"tool_calls":[{"name":"bash","arguments":{"command":"ls"}}]}\n' +
+          '不需要工具就直接说你想说的。能用的工具：' + sigs.join('、'),
+      );
+    }
+    lines.push('');
+  }
+
+  // 把工具结果挂到它对应的那次调用后面，读起来像「我跑完贴给你」
+  const pendingCalls = [];
+  for (const m of convo) {
+    if (m.role === 'assistant') {
+      const calls = describeToolCalls(m);
+      const text = pick(m.content);
+      if (text) lines.push('你：' + text);
+      if (calls) lines.push('你（让我跑）：' + calls);
+      if (calls) pendingCalls.push(calls);
+    } else if (m.role === 'tool') {
+      const label = m.tool_call_id && names.get(m.tool_call_id) ? names.get(m.tool_call_id) : '工具';
+      const out = clipToolOutput(pick(m.content));
+      lines.push('（我按你的意思跑了 ' + label + '）结果：\n' + out);
+      if (pendingCalls.length) pendingCalls.pop();
+    } else if (m.role === 'user') {
+      lines.push('我：' + pick(m.content));
+    }
+  }
+
+  if (toolSignatures(tools).length) lines.push('（照旧：要跑东西就回那行 JSON，别贴代码块。不要重复我已经知道的设定。）');
+  const text = lines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+
+  if (estimateTokens(text) > lim.maxPromptTokens) {
+    // 太长就砍掉中段历史，保头保尾（真人也会说「前面略」）
+    const head = lines.slice(0, 2);
+    const tail = lines.slice(-8);
+    return [...head, '…（前面聊的略）…', ...tail].join('\n').slice(0, lim.maxPromptChars);
+  }
+  return text;
+}
+
 function conversationKey(messages) {
   const first = messages.find((m) => m.role === 'user');
   const seed = first ? String(first.content).slice(0, 4000) : JSON.stringify(messages.slice(0, 2));
@@ -644,6 +743,7 @@ async function handleChat(req, res) {
     }
   }
 
+  const humanStyle = () => loadConfig().promptStyle !== 'api';
   let prompt;
   if (continuing) {
     // 续聊：把「网页会话里还没有的新消息」按 API 的 messages 形状发过去
@@ -655,9 +755,11 @@ async function handleChat(req, res) {
       const fb = cleanHistoryText(typeof lastUser.content === 'string' ? lastUser.content : contentToText(lastUser.content));
       deltaMsgs.push({ role: 'user', content: fb });
     }
-    prompt = buildApiPrompt(deltaMsgs, tools, { resume: true, skipSystem: true });
+    prompt = humanStyle()
+      ? buildHumanPrompt(deltaMsgs, tools, { resume: true, skipSystem: true })
+      : buildApiPrompt(deltaMsgs, tools, { resume: true, skipSystem: true });
   } else {
-    prompt = buildApiPrompt(messages, tools);
+    prompt = humanStyle() ? buildHumanPrompt(messages, tools) : buildApiPrompt(messages, tools);
   }
   log('[ctx] conv=' + convKey.slice(0, 8) + ' mode=' + reason + ' sent=' + transcript.length + ' prompt=' + prompt.length + ' session=' + (continuing ? String(prev.sessionId).slice(0, 8) : 'new'));
   if (prompt.length > modeLimits(currentMode()).maxPromptChars) log('[prompt] WARNING oversize ' + prompt.length);

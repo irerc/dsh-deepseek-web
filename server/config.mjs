@@ -26,6 +26,9 @@ export const DEFAULTS = {
   sendGapMaxMs: 4500,
   // 请求模式：raw 原始（提示词原样、不加额外说明）| safe 保险（提示词里插使用规范 + 更慢更保守）
   requestMode: 'raw',
+  // 提示词形态：human = 把对话写成「我：/你：」的人话（默认）；api = 旧的整段 OpenAI 请求体 JSON。
+  // 站点看到的是用户消息，一条以 {"model":"deepseek-web","messages":[ 开头的消息，形状本身就是「我是代理」。
+  promptStyle: 'human',
   // 传输层：browser 走真实 Chromium 页面发请求（TLS/JA4 指纹 = 浏览器，PoW 也在页面里解）
   //         node 直连（旧实现，Node 的 TLS 指纹能被判成非浏览器；B 站/风控侧更易识别）
   // 参考实现 0.7.0 起把浏览器列为**破坏性变更的默认**：auto = 优先真实浏览器，起不来才退回 Node（并在设置页亮红字）。
@@ -175,6 +178,7 @@ export function saveConfig(patch) {
   clean.warmup = clean.warmup !== false;
   clean.warmupMsgs = Math.max(0, Math.min(4, Number(clean.warmupMsgs) || 0));
   clean.requestMode = ['raw', 'safe'].includes(clean.requestMode) ? clean.requestMode : 'raw';
+  clean.promptStyle = ['human', 'api'].includes(clean.promptStyle) ? clean.promptStyle : 'human';
   clean.transport = ['auto', 'device', 'browser', 'native', 'node'].includes(clean.transport) ? clean.transport : 'auto';
   clean.browserPath = String(clean.browserPath || '').trim().slice(0, 300);
   clean.nativePython = String(clean.nativePython || '').trim().slice(0, 300);

@@ -35,7 +35,7 @@ git+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web.git
 **② 发行版压缩包（镜像，最快）**
 
 ```
-https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.64/dsh-deepseek-web-1.0.64.tgz
+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.65/dsh-deepseek-web-1.0.65.tgz
 ```
 
 **③ 仓库页（镜像浏览）**
@@ -47,7 +47,7 @@ https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web
 > 镜像不可用时，把上面链接里的 `https://gh-proxy.com/` 去掉即可直连 GitHub（官方速度可能较慢）：
 >
 > - 插件 spec：`https://github.com/irerc/dsh-deepseek-web`
-> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.64/dsh-deepseek-web-1.0.64.tgz`
+> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.65/dsh-deepseek-web-1.0.65.tgz`
 
 **不需要任何 API key**：插件自带 provider 配置与本地网关（`127.0.0.1:18081`），装好即用。
 
@@ -109,6 +109,7 @@ dsh-deepseek-web doctor
 | Cookie | 页面自己的 jar | 登录时抓的 cookie 原样回放 | 接近，但不会像页面那样滚动更新 |
 | 是谁在发包 | 人开着浏览器 | v1.0.63 起可切「手机浏览器」档：直接接管手机上那台真 Chrome 的调试端口 | 可选，默认关 |
 | 账号前几条消息 | 先打招呼再谈正事 | 登录后先闲聊 1~2 句（可关） | 已做 |
+| 消息的形状 | 人打出来的话 | v1.0.65 起提示词是「我：/你：」对话体，长输出截断，不再出现 API JSON 外壳 | 已做 |
 | 节奏（间隔/打字/作息/走神/每日上限） | 人的节奏 | 人类节律默认开；打字间隔自 v1.0.64 起为对数正态逐字模型 | 已做 |
 | 设备关联 | 一台设备一套身份 | 「清除设备痕迹」换新 UUID / 清指纹 / 清计数 | 可选；治设备关联，不治账号历史 |
 | 会话复用 | 同一条对话 | 复用 `chat_session_id` 续聊 | 一致 |
@@ -339,6 +340,48 @@ bin/cli.mjs           login/accounts/start/stop/status/doctor
 MIT License
 
 ## 更新日志
+
+### v1.0.65
+**提示词改成人类对话：不再把 OpenAI 请求体 JSON 灌进聊天框**
+
+之前每轮发出去的消息长这样（站点侧一眼就是代理）：
+```json
+{"model":"deepseek-web","messages":[{"role":"tool","content":"=== git status ===..."}]}
+```
+现在默认写成人和助手说话的样子：
+
+```text
+接着往下做，不用重新自我介绍。
+（我之前的设定：你是一个写代码的助手…）
+需要我跑命令或读文件时，你就只回一行这样的 JSON，我照做然后把输出贴回来：
+{"tool_calls":[{"name":"bash","arguments":{"command":"ls"}}]}
+能用的工具：bash{command,timeoutMs?}、read{file_path}、edit{file_path,old_string,new_string}…
+
+我：帮我修一下 VSCode 移植崩溃
+你：先看现状。
+你（让我跑）：bash {"command":"git status"}
+（我按你的意思跑了 bash）结果：
+clean
+…（省略 4820 字）…
+我：继续，把 kotlin-stdlib 修好
+（照旧：要跑东西就回那行 JSON，别贴代码块。不要重复我已经知道的设定。）
+```
+
+具体做了什么：
+
+| 变化 | 为什么 |
+|---|---|
+| 去掉 `{"model":…,"messages":…}` 外壳 | 这个形状本身就是「我是反代」的自白，比频率更容易被抓 |
+| system 压成一句「我之前的设定：…」 | 真人也会说「按之前说的来」，不会贴一整段 system prompt |
+| 历史写成 `我：/你：` 对话体 | 网页聊天记录本来就是这么长的 |
+| 工具调用写成「你（让我跑）：bash …」 | 不再出现 `tool_call_id` / `tool_calls` 字段名 |
+| 工具输出截断到 1200 + 200 字，中间标「省略 N 字」 | 真人贴日志也会截断，5000 字原文是最明显的机器特征 |
+| 工具清单只留短签名 `bash{command}` | 不再把整个 JSON Schema 铺进去 |
+| 续聊只发新增内容 | 设定与工具说明只出现一次，之后就是正常聊天 |
+
+回退开关：「运行设置 → 提示词形态 → API 原样」恢复旧行为（排查兼容问题时用）。
+
+**也说清楚边界**：这只改变「发出去的文字长什么样」，不改变「用网页版聊天窗口跑 Agent」这件事本身；工具调用这件事仍然存在，只是不再以 API JSON 的形式出现。
 
 ### v1.0.64
 **界面瘦身 + 「像人一样」亮到明面 + 打字节奏换成对数正态（参考开源人化库）**
