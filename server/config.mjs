@@ -63,7 +63,11 @@ export const DEFAULTS = {
   // 风控的主判据本来就是频率/体量/作息这些统计特征 —— 比 TLS 指纹更难洗。
   humanRhythm: process.env.DS_HUMAN_RHYTHM !== '0',
   dailyMsgs: Math.max(0, Number(process.env.DS_DAILY_MSGS || 240)), // 每账号 24h 上限，0 = 关闭
-  nightQuiet: process.env.DS_NIGHT_QUIET !== '0', // 01:00~06:30 放大间隔（真人要睡觉）
+  nightQuiet: process.env.DS_NIGHT_QUIET !== '0',
+  // 登录后先闲聊：新账号第一次发消息前，像人一样随便聊 warmupMsgs 句（默认 2）。
+  // 改变不了自动化访问的性质，只让「账号的前几条消息」看起来像人。
+  warmup: process.env.DS_WARMUP !== '0',
+  warmupMsgs: Math.max(0, Math.min(4, Number(process.env.DS_WARMUP_MSGS || 2))),
   // 失效 / 被限流时自动换号。**默认关**（参考实现：几分钟内换号继续发是极强的机器行为特征，
   // 多号交替活跃反而更容易被判定成「多开小号」）。想恢复旧行为去「高级选项（高危）」里打开。
   autoSwitch: false,
@@ -168,8 +172,10 @@ export function saveConfig(patch) {
   clean.humanRhythm = clean.humanRhythm !== false;
   clean.dailyMsgs = Math.max(0, Math.min(5000, Number(clean.dailyMsgs) || 0));
   clean.nightQuiet = clean.nightQuiet !== false;
+  clean.warmup = clean.warmup !== false;
+  clean.warmupMsgs = Math.max(0, Math.min(4, Number(clean.warmupMsgs) || 0));
   clean.requestMode = ['raw', 'safe'].includes(clean.requestMode) ? clean.requestMode : 'raw';
-  clean.transport = ['auto', 'browser', 'native', 'node'].includes(clean.transport) ? clean.transport : 'auto';
+  clean.transport = ['auto', 'device', 'browser', 'native', 'node'].includes(clean.transport) ? clean.transport : 'auto';
   clean.browserPath = String(clean.browserPath || '').trim().slice(0, 300);
   clean.nativePython = String(clean.nativePython || '').trim().slice(0, 300);
   clean.idleStopMs = Math.max(60000, Math.min(24 * 3600 * 1000, Number(clean.idleStopMs) || DEFAULTS.idleStopMs));

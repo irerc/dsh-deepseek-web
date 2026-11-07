@@ -35,7 +35,7 @@ git+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web.git
 **② 发行版压缩包（镜像，最快）**
 
 ```
-https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.62/dsh-deepseek-web-1.0.62.tgz
+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.63/dsh-deepseek-web-1.0.63.tgz
 ```
 
 **③ 仓库页（镜像浏览）**
@@ -47,7 +47,7 @@ https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web
 > 镜像不可用时，把上面链接里的 `https://gh-proxy.com/` 去掉即可直连 GitHub（官方速度可能较慢）：
 >
 > - 插件 spec：`https://github.com/irerc/dsh-deepseek-web`
-> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.62/dsh-deepseek-web-1.0.62.tgz`
+> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.63/dsh-deepseek-web-1.0.63.tgz`
 
 **不需要任何 API key**：插件自带 provider 配置与本地网关（`127.0.0.1:18081`），装好即用。
 
@@ -107,7 +107,10 @@ dsh-deepseek-web doctor
 | **出站栈是否唯一** | 只有一个栈 | v1.0.62 前：对话 h2 + 体检/登录 h1.1 混用 → 现在统一 | 已修 |
 | 设备身份 | `x-device-id` 稳定 | 登录页/引擎共用同一 UUID | 一致 |
 | Cookie | 页面自己的 jar | 登录时抓的 cookie 原样回放 | 接近，但不会像页面那样滚动更新 |
+| 是谁在发包 | 人开着浏览器 | v1.0.63 起可切「手机浏览器」档：直接接管手机上那台真 Chrome 的调试端口 | 可选，默认关 |
+| 账号前几条消息 | 先打招呼再谈正事 | 登录后先闲聊 1~2 句（可关） | 已做 |
 | 节奏（间隔/打字/作息/走神/每日上限） | 人的节奏 | 人类节律默认开 | 已做 |
+| 设备关联 | 一台设备一套身份 | 「清除设备痕迹」换新 UUID / 清指纹 / 清计数 | 可选；治设备关联，不治账号历史 |
 | 会话复用 | 同一条对话 | 复用 `chat_session_id` 续聊 | 一致 |
 | `accept-encoding` | `gzip, deflate, br, zstd` | 由底层库决定（Node 只发 gzip/deflate） | **残留**：为不让解压失败打断对话，没有强行伪造 |
 | 对话内容 | 人写的自然语言 | 系统契约 + 工具 schema + 多轮工具循环 | **最大残留**，见下 |
@@ -336,6 +339,30 @@ bin/cli.mjs           login/accounts/start/stop/status/doctor
 MIT License
 
 ## 更新日志
+
+### v1.0.63
+**真·手机浏览器档位 + 登录后闲聊热身 + 一键清除设备痕迹**
+
+一、**手机浏览器（最真的那条路）**
+新增传输档 `device`：接管手机上**已经在跑**的 Chrome / Edge 的调试端口，对话请求从**那台真浏览器**里发出去——
+真进程、真证书链、真 HTTP/2 帧、真 cookie、真 DNS。代价是慢（每次请求多几十到几百毫秒）、页面要一直开着、更耗电，所以做成显式开关，不默认开。
+- 自动探测 127.0.0.1 的 9222/9223/9224/9333，取 `chat.deepseek.com` 的页面目标，经 CDP 驱动；
+- 用不了时**不静默降级**：界面直接给原因（例如「检测到 @chrome_devtools_remote 但被 SELinux 拒绝（EACCES）→ 只能走 TCP 端口」）和一次性配置步骤（chrome://flags 开命令行长、写 `/data/local/tmp/chrome-command-line`、`chrome --remote-debugging-port=9222`、彻底退出重开、先访问一次站点）；
+- 「自动」档顺位变为：手机浏览器 → 本机浏览器 → 本地伪装（curl_cffi）→ Node 直连并亮红字。
+
+二、**登录后先闲聊热身**
+新账号第一次真正发消息之前，先按同一出站路径、同一套人类节律随便聊 1~2 句（内置 12 条短句随机挑，例如「你好呀」「今天有点累，你呢」），然后才发真实请求。
+- 每个账号只做一次（记 `warmupAt`），失败不阻塞真实请求；
+- 开关在「运行设置 → 登录后先闲聊」，句数 0~4 可调；
+- 它改变不了「用聊天界面跑工具」的性质，只是让账号的前几条消息看起来像人，而不是「登录 → 立刻结构化请求」。
+
+三、**清除设备痕迹**
+账号「更多」里新增「清除设备痕迹」：换新设备 id（UUID v4）、清空请求头指纹、清空热身标记、把 24h 发送计数归零。
+服务端只有 `/accounts/:id/reset-trace` 与 `/reset-trace` 两个入口，token / 密码保留，不会把你踢下线。
+**必须说清它治什么**：治的是「本机这一侧的设备关联」；站点上的账号历史、对话内容、IP、处置记录不会因此消失，而且「换新设备」这个动作本身也可能触发一次额外验证。
+
+四、**账号行减负**
+每个账号默认只留「检查」「更多」两个按钮；登录、设为当前、打开登录页、改名、清除设备痕迹、删除全部收进「更多」。原来三行的元信息（来源 / 登录时间 / cookie 项数）并成一行。
 
 ### v1.0.62
 **统一出站：同一账号只有一套 TLS 栈（这是最像「反代」的痕迹）**

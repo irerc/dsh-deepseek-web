@@ -3,7 +3,7 @@ import { BASE, UA, post, get, classify, UpstreamError, baseHeaders, humanHeaders
 import { solvePowHeader } from './pow.mjs';
 import { loadConfig } from './config.mjs';
 import { currentMode, modeLimits, gapFor, rateWindowFor, LONG_RUN_THRESHOLD, HUMAN_BREAK_MS, longRestFor, throttleBackoffMs } from './request-mode.mjs';
-import { pickAccount, markUsed, markCooldown, setCooldown, markAuthExpired, markMuted, listAccounts, getToken, getCookie, getFingerprint } from './accounts.mjs';
+import { pickAccount, markUsed, markCooldown, setCooldown, markAuthExpired, markMuted, listAccounts, getToken, getCookie, getFingerprint, updateAccount } from './accounts.mjs';
 import { humanGapPlan, checkDailyBudget, recordHumanSend } from './human-rhythm.mjs';
 import { reloginAccount } from './relogin.mjs';
 import { createStreamParser } from './stream-parser.mjs';
@@ -11,6 +11,8 @@ import { BrowserTransport, browserAvailability } from './browser-transport.mjs';
 import { NativeTransport, nativeAvailability } from './native-transport.mjs';
 import { deviceId } from './device.mjs';
 import { probeToken } from './token-check.mjs';
+import { deviceBrowserAvailability } from './device-browser.mjs';
+import { pickWarmupPhrases, warmupNeeded } from './warmup.mjs';
 
 /**
  * 传输层三档：
@@ -22,10 +24,10 @@ import { probeToken } from './token-check.mjs';
  */
 export function configuredTransport() {
   const env = String(process.env.DS_NETWORK_TRANSPORT || '').toLowerCase();
-  if (['node', 'browser', 'native', 'auto'].includes(env)) return env;
+  if (['node', 'browser', 'native', 'device', 'auto'].includes(env)) return env;
   try {
     const v = loadConfig().transport;
-    return ['node', 'browser', 'native', 'auto'].includes(v) ? v : 'auto';
+    return ['node', 'browser', 'native', 'device', 'auto'].includes(v) ? v : 'auto';
   } catch {
     return 'auto';
   }
@@ -37,6 +39,7 @@ let _lastWarnAt = 0;
 /** 同步读：auto 还没判定过时先按 browser（第一次请求会 await resolveTransport 再定） */
 export function transportMode() {
   const c = configuredTransport();
+  if (c === 'device') return 'browser'; // 真·手机浏览器在实现上就是「浏览器档 + 远端 CDP」
   if (c !== 'auto') return c;
   return _resolved || 'browser';
 }
@@ -46,11 +49,33 @@ export function transportMode() {
  *   auto = browser（桌面端最真）→ native（浏览器起不来时的通用解：curl_cffi 浏览器级 TLS）→ node（兜底）
  * 三次探测结果都有 5 分钟缓存，不会每条消息都去起一遍。
  */
+let _resolvedVia = '';
+export function resolvedVia() {
+  return _resolvedVia;
+}
+
 export async function resolveTransport() {
   const c = configuredTransport();
+  if (c === 'device') {
+    const dev = await deviceBrowserAvailability();
+    if (!dev.ok || dev.needPage) {
+      throw new UpstreamError('手机浏览器不可用：' + (dev.needPage ? dev.hint : dev.reason), { kind: 'transport' });
+    }
+    _resolvedVia = 'device';
+    _resolved = 'browser';
+    return 'browser';
+  }
   if (c !== 'auto') {
+    _resolvedVia = '';
     _resolved = c;
     return c;
+  }
+  // auto：真浏览器优先（本机 Chrome 接管）→ 本地 Chromium → native 伪装
+  const dev = await deviceBrowserAvailability();
+  if (dev.ok && !dev.needPage) {
+    _resolvedVia = 'device';
+    _resolved = 'browser';
+    return 'browser';
   }
   const browser = await browserAvailability();
   if (browser.ok) {
@@ -219,10 +244,12 @@ export class DeepSeekHttp {
   /** 传输层自检：能不能用（设置页会显示结果，不静默降级） */
   async transportStatus() {
     const configured = configuredTransport();
+    const device = await deviceBrowserAvailability();
     const browser = await browserAvailability();
     const native = await nativeAvailability({ autoInstall: false });
     let mode = configured;
-    if (configured === 'auto') mode = browser.ok ? 'browser' : native.ok ? 'native' : 'node';
+    if (configured === 'auto') mode = device.ok && !device.needPage ? 'browser' : browser.ok ? 'browser' : native.ok ? 'native' : 'node';
+    if (configured === 'device') mode = device.ok && !device.needPage ? 'browser' : 'device';
     return {
       configured,
       mode,
@@ -231,6 +258,15 @@ export class DeepSeekHttp {
       version: browser.version || '',
       reason: mode === 'browser' ? browser.reason || '' : mode === 'native' ? '' : configured === 'auto' ? browser.reason || '' : '',
       native: { ok: native.ok, python: native.python || '', version: native.version || '', reason: native.reason || '' },
+      device: {
+        ok: Boolean(device.ok && !device.needPage),
+        via: device.via || '',
+        port: device.port || 0,
+        browser: device.browser || '',
+        reason: device.reason || device.hint || '',
+        selinux: device.selinux || '',
+      },
+      deviceActive: resolvedVia() === 'device',
       fallback: configured === 'auto' && mode !== 'browser',
       note:
         mode === 'browser'
@@ -279,6 +315,22 @@ export class DeepSeekHttp {
   }
 
   /**
+   * 出站前把传输档准备好：如果解析结果是「真·手机浏览器」，就把目标页面的 CDP 地址交给
+   * BrowserTransport（它只在真正用到时才连，避免空转）。
+   */
+  async _prepareTransport() {
+    const mode = await resolveTransport();
+    if (resolvedVia() === 'device') {
+      const dev = await deviceBrowserAvailability();
+      if (!dev.ok || dev.needPage) {
+        throw new UpstreamError('手机浏览器不可用：' + (dev.needPage ? dev.hint : dev.reason), { kind: 'transport' });
+      }
+      this.browser.setRemote(dev.wsUrl, dev.pageUrl || BASE + '/');
+    }
+    return mode;
+  }
+
+  /**
    * 统一出站：同一个账号的**所有** chat.deepseek.com 请求都走同一个传输档。
    *
    * 为什么必须统一：真实浏览器只有一个 TLS/HTTP 栈。插件以前把「对话」交给 native（curl_cffi，
@@ -290,7 +342,7 @@ export class DeepSeekHttp {
     const h = { ...baseHeaders(token), ...humanHeaders(), ...headers };
     let mode = 'node';
     try {
-      mode = await resolveTransport();
+      mode = await this._prepareTransport();
     } catch {}
     if (mode === 'browser') {
       try {
@@ -452,6 +504,10 @@ export class DeepSeekHttp {
    */
   async chat({ prompt, thinking = false, sessionId = null, parentId = null, onDelta, idleMs = 180000, preferAccount = null, typedChars = 0 }) {
     const cfg = loadConfig();
+    // 新账号第一次真正用之前，先像人一样闲聊两句（同一条出站路径、同一套节律）
+    if (cfg.warmup) {
+      try { await this._maybeWarmup(preferAccount); } catch (e) { this.log('[warmup] 跳过：' + String((e && e.message) || e).slice(0, 120)); }
+    }
     const tried = new Set();
     let lastError = null;
     let prefer = preferAccount;
@@ -562,8 +618,56 @@ export class DeepSeekHttp {
     });
   }
 
+  /**
+   * 登录后的热身：只对「还没用过」的账号做一次，闲聊 1~2 句，然后打上 warmupAt。
+   * 失败不阻塞真实请求（记日志、标记跳过），避免热身把主流程拖死。
+   */
+  async _maybeWarmup(prefer = null) {
+    if (this._warmingDone) return null;
+    const cfg = loadConfig();
+    const count = Math.max(0, Math.min(4, Number(cfg.warmupMsgs) || 0));
+    if (!count) return null;
+    const accounts = listAccounts().filter((a) => a.status === 'ok' && !a.muted && !a.banned);
+    const account = prefer ? accounts.find((a) => a.id === prefer) : accounts[0];
+    if (!account || !warmupNeeded(account, cfg)) return null;
+    // 用过就不假装：给个标记免得每次请求都判断
+    if (account.lastUsedAt) {
+      updateAccount(account.id, { warmupAt: Date.now() });
+      return null;
+    }
+    const token = getToken(account.id);
+    if (!token) return null;
+    this.log('[warmup] 账号「' + (account.label || account.email || account.id) + '」首次使用，先闲聊 ' + count + ' 句');
+    const phrases = pickWarmupPhrases(count);
+    for (const phrase of phrases) {
+      try {
+        await this.pace(account.id, phrase.length);
+        await this._runChat(account.id, () =>
+          this._chatOnce({
+            token,
+            cookie: getCookie(account.id),
+            prompt: phrase,
+            thinking: false,
+            onDelta: () => {},
+            accountId: account.id,
+          }),
+        );
+        markUsed(account.id);
+        this.log('[warmup] 说了：' + phrase);
+      } catch (error) {
+        if (error && (error.kind === 'mute' || error.kind === 'banned')) {
+          markMuted(account.id, error.untilMs || 0, { banned: error.kind === 'banned', reason: error.reason || error.message || '' });
+        }
+        this.log('[warmup] 中断：' + String((error && error.message) || error).slice(0, 120));
+        break;
+      }
+    }
+    updateAccount(account.id, { warmupAt: Date.now() });
+    return null;
+  }
+
   async _chatOnce(args) {
-    const mode = await resolveTransport();
+    const mode = await this._prepareTransport();
     if (mode === 'browser') return this._chatOnceBrowser(args);
     if (mode === 'native') return this._chatOnceNative(args);
     return this._chatOnceNode(args);

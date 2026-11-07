@@ -334,8 +334,32 @@ export class BrowserTransport {
     return run;
   }
 
+  /**
+   * 接管一台**外部**浏览器（手机上真实的 Chrome / Edge / WebView 调试端口）。
+   * 与 _launch 的区别：这里不起进程、不碰本地 Chromium，只是连上去用它的页面。
+   */
+  setRemote(wsUrl, pageUrl = '') {
+    const next = String(wsUrl || '');
+    if (next && next !== this.remoteWs) {
+      this.remoteWs = next;
+      if (pageUrl) this.pageUrl = pageUrl;
+      this.bindingReady = false;
+      this.cdp = null; // 换了目标就重新连，避免拿着旧会话打新页面
+    }
+  }
+
+  async attach() {
+    if (this.cdp && !this.cdp.closed && this.attachedWs === this.remoteWs) return this.cdp;
+    this.cdp = await Cdp.connect(this.remoteWs, 15000);
+    this.attachedWs = this.remoteWs;
+    this.bindingReady = false;
+    this.log('[device] 已接管手机浏览器页面：' + this.remoteWs.slice(0, 90));
+    return this.cdp;
+  }
+
   async ensure() {
     if (this.cdp && !this.cdp.closed) return this.cdp;
+    if (this.remoteWs) return this.attach();
     await this._launch();
     return this.cdp;
   }

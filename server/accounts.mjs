@@ -101,6 +101,7 @@ export function publicAccount(a) {
     // 登录时从真实页面抄下来的请求头指纹（x-hif-* / x-client-*），引擎发请求时会原样带上
     hasFingerprint: Boolean(a.fingerprint && Object.keys(a.fingerprint).length),
     fingerprintAt: a.fingerprintAt || null,
+    warmupAt: a.warmupAt || null,
     loginAt: a.loginAt || a.addedAt || null,
     // 所属分组 id（空 = 未分组）。分组只影响面板显示，不参与调度
     groupId: a.groupId || '',
