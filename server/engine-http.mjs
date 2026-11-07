@@ -1,5 +1,5 @@
 // HTTP 引擎：不依赖浏览器，直接用 chat.deepseek.com 的网页接口
-import { BASE, UA, post, get, classify, UpstreamError, baseHeaders, humanHeaders } from './http.mjs';
+import { BASE, UA, post, get, classify, UpstreamError, baseHeaders, humanHeaders, setUpstreamHook } from './http.mjs';
 import { solvePowHeader } from './pow.mjs';
 import { loadConfig } from './config.mjs';
 import { currentMode, modeLimits, gapFor, rateWindowFor, LONG_RUN_THRESHOLD, HUMAN_BREAK_MS, longRestFor, throttleBackoffMs } from './request-mode.mjs';
@@ -72,6 +72,10 @@ export async function resolveTransport() {
 
 const lastSentAt = new Map(); // accountId -> 上一次请求「开始」时间
 const lastDoneAt = new Map(); // accountId -> 上一次请求「结束」时间（间隔要按结束算，长回答之后不必白等，但必须等满）
+
+function safeJson(text) {
+  try { return JSON.parse(String(text)); } catch { return null; }
+}
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
@@ -146,6 +150,9 @@ export function noteThrottled(now = Date.now()) {
 export class DeepSeekHttp {
   constructor(log = () => {}) {
     this.log = log;
+    // 所有 chat.deepseek.com 出站（对话 / 体检 / 登录 / PoW / 建会话）都走同一传输档：
+    // 真实浏览器只有一个 TLS 栈，混用 Node 的 h1.1 是「反代」最直接的证据。
+    setUpstreamHook((o) => this.upstreamJson(o));
     this.busy = Promise.resolve();
     this._depth = 0;
     this._active = 0;
@@ -254,7 +261,7 @@ export class DeepSeekHttp {
     const active = accounts.find((a) => a.status === 'ok') || accounts[0];
     const token = getToken(active.id);
     try {
-      const res = await get('/api/v0/users/current', { token });
+      const res = await this.upstreamJson({ path: '/api/v0/users/current', token });
       if (res.status === 200 && res.json?.code === 0) {
         return {
           ok: true,
@@ -269,6 +276,48 @@ export class DeepSeekHttp {
     } catch (error) {
       return { ok: false, loggedIn: false, engine: 'http', accounts, error: String(error.message || error) };
     }
+  }
+
+  /**
+   * 统一出站：同一个账号的**所有** chat.deepseek.com 请求都走同一个传输档。
+   *
+   * 为什么必须统一：真实浏览器只有一个 TLS/HTTP 栈。插件以前把「对话」交给 native（curl_cffi，
+   * JA4 = Chrome、h2），却把「token 体检」交给 Node 的 undici（h1.1、JA4 完全不同）——
+   * 同一账号、同一 IP、同一时间窗里出现两套指纹，比任何单个指纹细节都更像「有人在中间转」。
+   * 真实浏览器不会这样，所以这里要么全程 chrome 级，要么（只有它不可用时）全程 node。
+   */
+  async upstreamJson({ path, token = '', headers = {}, timeoutMs = 20000, method = 'GET', body = undefined }) {
+    const h = { ...baseHeaders(token), ...humanHeaders(), ...headers };
+    let mode = 'node';
+    try {
+      mode = await resolveTransport();
+    } catch {}
+    if (mode === 'browser') {
+      try {
+        const r = await this.browser.request({ path, method, headers: h, body: method === 'GET' ? null : String(body ?? '{}'), timeoutMs });
+        return { status: r.status, text: r.text || '', json: safeJson(r.text) };
+      } catch (e) {
+        this.log('[transport] 统一出站走浏览器失败，降级 native：' + String(e.message || e).slice(0, 120));
+      }
+    }
+    if (mode === 'browser' || mode === 'native') {
+      try {
+        const r = await this.native.call({
+          path,
+          headers: h,
+          method,
+          body: method === 'GET' ? '' : String(body ?? '{}'),
+          timeout: Math.max(5, Math.ceil(timeoutMs / 1000)),
+        });
+        return r;
+      } catch (e) {
+        this.log('[transport] 统一出站走 native 失败，降级 node（会出现混合指纹）：' + String(e.message || e).slice(0, 120));
+      }
+    }
+    if (method === 'GET') return get(path, { token, headers, timeoutMs, _raw: true });
+    // 回退到 Node 时 body 已经是 JSON 字符串：不能再 stringify 一次，否则变成了「JSON 的字符串」
+    const parsed = typeof body === 'string' ? safeJson(body) : body;
+    return post(path, parsed ?? {}, { token, headers, timeoutMs, _raw: true });
   }
 
   /**
@@ -435,7 +484,7 @@ export class DeepSeekHttp {
           // 「登录态失效」不一定是真的：WAF 拦截页（202 HTML）、限流、网络抖动同样不是 200。
           // 复检一次 token：只有站点明确回 INVALID_TOKEN 才敢动账号状态，否则按临时故障处理，
           // 免得把好号标成失效（用户看到「经常登录失效」，很多是这种假警报）。
-          const probe = await probeToken(token);
+          const probe = await probeToken(token, { requester: (o) => this.upstreamJson(o) });
           if (probe.state === 'valid') {
             if (!transientRetried.has(account.id)) {
               transientRetried.add(account.id);

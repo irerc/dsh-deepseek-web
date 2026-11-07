@@ -14,12 +14,16 @@ import { get } from './http.mjs';
  * @param {string} token
  * @returns {Promise<{state:'valid'|'invalid'|'unknown', user?:object, message?:string, code?:string}>}
  */
-export async function probeToken(token) {
+export async function probeToken(token, { requester = null } = {}) {
   if (!token || typeof token !== 'string' || token.length < 20) {
     return { state: 'invalid', message: '没有可用的 token' };
   }
   try {
-    const res = await get('/api/v0/users/current', { token, timeoutMs: 20000 });
+    // requester 由引擎注入：走和对话相同的传输档（同账号永远同一个 TLS 指纹）。
+    // 没注入时（独立工具/老调用点）才退回 Node 直连。
+    const res = requester
+      ? await requester({ path: '/api/v0/users/current', token, timeoutMs: 20000, method: 'GET' })
+      : await get('/api/v0/users/current', { token, timeoutMs: 20000 });
     const code = res.json?.code;
     if (res.status === 200 && code === 0) {
       // 这个接口的 biz_data 直接就是 user 对象（不是包在 biz_data.user 里）

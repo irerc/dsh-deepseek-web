@@ -54,12 +54,22 @@ export function humanHeaders() {
   };
 }
 
+// 统一出站钩子：由引擎注入，把 post/get（登录、体检、PoW、建会话……）也交给同一个传输档。
+// 不注入时退回 Node 直连 —— 单测/独立工具仍然能用，但生产环境同一账号不会混用两套 TLS 栈。
+let upstreamHook = null;
+export function setUpstreamHook(fn) {
+  upstreamHook = typeof fn === 'function' ? fn : null;
+}
+
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
 /** JSON 请求；返回 { status, json, text } */
-export async function post(path, body, { token = null, headers = {}, timeoutMs = 30000, signal = null } = {}) {
+export async function post(path, body, { token = null, headers = {}, timeoutMs = 30000, signal = null, _raw = false } = {}) {
+  if (upstreamHook && !_raw && !signal) {
+    return upstreamHook({ path, method: 'POST', token: token || '', headers, body: JSON.stringify(body ?? {}), timeoutMs });
+  }
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(new Error('timeout')), timeoutMs);
   const onAbort = () => ac.abort(signal.reason);
@@ -85,7 +95,10 @@ export async function post(path, body, { token = null, headers = {}, timeoutMs =
   }
 }
 
-export async function get(path, { token = null, timeoutMs = 30000 } = {}) {
+export async function get(path, { token = null, timeoutMs = 30000, headers = {}, _raw = false } = {}) {
+  if (upstreamHook && !_raw) {
+    return upstreamHook({ path, method: 'GET', token: token || '', headers, timeoutMs });
+  }
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(new Error('timeout')), timeoutMs);
   try {

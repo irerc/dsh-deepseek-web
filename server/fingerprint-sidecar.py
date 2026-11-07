@@ -7,7 +7,9 @@
 #
 # 协议（只监听 127.0.0.1，随机端口）：
 #   GET  /__ping                → {"ok":true,"curl_cffi":"0.17.0","impersonate":"chrome131"}
-#   POST /__fetch  {"path","headers","body","timeout"} → 上游状态码 + 原样 body（chunked 直通，SSE 不缓冲）
+#   POST /__fetch  {"path","headers","body","timeout","method"} → 上游状态码 + 原样 body（chunked 直通，SSE 不缓冲）
+#                  method 默认 POST；GET 用于只读接口（token 体检这类），保证「同一个账号永远同一个 TLS 指纹」——
+#                  混用 Node 的 h1.1 客户端去查同一个账号，是比任何指纹细节都明显的反代痕迹。
 # 只允许 /api/* 路径，避免变成一个通用代理。
 import argparse
 import json
@@ -79,15 +81,15 @@ class Handler(BaseHTTPRequestHandler):
         body = req.get('body')
         if isinstance(body, str):
             body = body.encode()
+        method = str(req.get('method') or 'POST').upper()
+        if method not in ('GET', 'POST'):
+            return self._json(400, {'error': 'only GET/POST allowed'})
         try:
-            r = creq.post(
-                BASE + path,
-                headers=headers,
-                data=body,
-                impersonate=IMPERSONATE,
-                timeout=float(req.get('timeout') or 120),
-                stream=True,
-            )
+            fn = creq.get if method == 'GET' else creq.post
+            kwargs = {'headers': headers, 'impersonate': IMPERSONATE, 'timeout': float(req.get('timeout') or 120), 'stream': True}
+            if method == 'POST':
+                kwargs['data'] = body
+            r = fn(BASE + path, **kwargs)
         except Exception as e:
             return self._json(502, {'error': (type(e).__name__ + ': ' + str(e))[:300]})
         try:

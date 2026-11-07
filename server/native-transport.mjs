@@ -234,12 +234,12 @@ export class NativeTransport {
   }
 
   /** 把一次上游请求交给 sidecar，拿回 fetch 的 Response（body 是流，SSE 直通不缓冲） */
-  async request({ path: reqPath, headers = {}, body = '', timeout = 120 }) {
+  async request({ path: reqPath, headers = {}, body = '', timeout = 120, method = 'POST' }) {
     const port = await this.ensure();
     const res = await fetch('http://127.0.0.1:' + port + '/__fetch', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ path: reqPath, headers, body, timeout }),
+      body: JSON.stringify({ path: reqPath, headers, body, timeout, method }),
     });
     if (!res.ok) {
       let text = '';
@@ -252,8 +252,8 @@ export class NativeTransport {
   }
 
   /** 一次性取回文本（PoW 挑战、建会话这类小 JSON） */
-  async call({ path: reqPath, headers = {}, body = '', timeout = 60 }) {
-    const res = await this.request({ path: reqPath, headers, body, timeout });
+  async call({ path: reqPath, headers = {}, body = '', timeout = 60, method = 'POST' }) {
+    const res = await this.request({ path: reqPath, headers, body, timeout, method });
     const text = await res.text();
     let json = null;
     try { json = JSON.parse(text); } catch {}

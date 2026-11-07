@@ -35,7 +35,7 @@ git+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web.git
 **② 发行版压缩包（镜像，最快）**
 
 ```
-https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.61/dsh-deepseek-web-1.0.61.tgz
+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.62/dsh-deepseek-web-1.0.62.tgz
 ```
 
 **③ 仓库页（镜像浏览）**
@@ -47,7 +47,7 @@ https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web
 > 镜像不可用时，把上面链接里的 `https://gh-proxy.com/` 去掉即可直连 GitHub（官方速度可能较慢）：
 >
 > - 插件 spec：`https://github.com/irerc/dsh-deepseek-web`
-> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.61/dsh-deepseek-web-1.0.61.tgz`
+> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.62/dsh-deepseek-web-1.0.62.tgz`
 
 **不需要任何 API key**：插件自带 provider 配置与本地网关（`127.0.0.1:18081`），装好即用。
 
@@ -95,7 +95,28 @@ dsh-deepseek-web doctor
 - 指定账号：模型名写 `deepseek-chat@工作号` 即可固定到某个账号。
 - **默认不自动换号**：某个号失效/被限流时直接报错停下（旧的自动轮换在「高级选项（高危）」里，默认关）。
 
-### 被禁言了怎么办（以及为什么会到这一步）
+### 反代痕迹审计：做到哪一步才「不像转发的」
+
+把「像人」拆成可以逐条核对的面，比笼统说「防封」有用。下表是当前实现状态，附证据来源。
+
+| 层 | 真实浏览器 | 本插件现状 | 结论 |
+|---|---|---|---|
+| TLS ClientHello（JA4/JA3、扩展顺序） | Chrome 131 | native 档 = curl_cffi `chrome131`，实测 JA4 `t13d1516h2_8daaf6152771_02713d6af862` | 一致 |
+| HTTP/2 帧（SETTINGS/WINDOW_UPDATE/伪头顺序） | Chrome | curl_cffi 复刻，实测 h2 指纹 `52d84b11…` 与 Chrome 同 | 一致 |
+| 请求头集合 | 含 `sec-ch-ua`/`sec-fetch-*`/`accept-language` | `humanHeaders()` 补齐，版本与 UA、impersonate 同源 | 一致 |
+| **出站栈是否唯一** | 只有一个栈 | v1.0.62 前：对话 h2 + 体检/登录 h1.1 混用 → 现在统一 | 已修 |
+| 设备身份 | `x-device-id` 稳定 | 登录页/引擎共用同一 UUID | 一致 |
+| Cookie | 页面自己的 jar | 登录时抓的 cookie 原样回放 | 接近，但不会像页面那样滚动更新 |
+| 节奏（间隔/打字/作息/走神/每日上限） | 人的节奏 | 人类节律默认开 | 已做 |
+| 会话复用 | 同一条对话 | 复用 `chat_session_id` 续聊 | 一致 |
+| `accept-encoding` | `gzip, deflate, br, zstd` | 由底层库决定（Node 只发 gzip/deflate） | **残留**：为不让解压失败打断对话，没有强行伪造 |
+| 对话内容 | 人写的自然语言 | 系统契约 + 工具 schema + 多轮工具循环 | **最大残留**，见下 |
+
+**最大的痕迹不在网络，在内容。** 服务端看到的是一段段结构化的工具调用循环（截图里那些 `|| DSML || invoke name="bash"`），
+加上每次请求前面那段固定的系统契约。这属于「用聊天界面当 API」的性质判断，不是指纹问题 ——
+任何 TLS/头部/节奏技巧都改不了它。想让工具链长期跑，正路是官方 API（`api.deepseek.com`）；网页版这条路适合人的量级。
+
+## 被禁言了怎么办（以及为什么会到这一步）
 
 站点的处置分两档：`50006` **禁言**（还能登录、不能发消息，有到期时间）和 `40012` **封号**（更重）。到期前插件不会再用这个账号发任何请求，账号行会显示到期时间和站点原文。
 
@@ -315,6 +336,18 @@ bin/cli.mjs           login/accounts/start/stop/status/doctor
 MIT License
 
 ## 更新日志
+
+### v1.0.62
+**统一出站：同一账号只有一套 TLS 栈（这是最像「反代」的痕迹）**
+
+真实浏览器只有一个网络栈。插件以前把「对话」交给 native（curl_cffi，JA4 = Chrome、HTTP/2），
+却把「token 体检 / 密码登录 / PoW / 建会话」交给 Node 的 undici（HTTP/1.1、JA4 完全不同）。
+同一账号、同一 IP、同一时间窗里出现两套指纹 —— 这比任何单个指纹细节都更像「中间有人在转」。
+
+现在：`server/http.mjs` 增加统一出站钩子（`setUpstreamHook`），引擎初始化时把自己接上去，
+**所有 chat.deepseek.com 出站一律走当前解析出的传输档**（浏览器 → native → node，只有前两档都不可用时才回落 node，并打日志）；
+native sidecar 增加 GET 支持（体检/只读接口以前只能 Node 直连）。
+回退链保证只回退一次、不递归，body 不会被二次 `JSON.stringify`。
 
 ### v1.0.61
 **禁言/封禁识别升级：显示站点原文 + 精确到期时间**
