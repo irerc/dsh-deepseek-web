@@ -35,7 +35,7 @@ git+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web.git
 **② 发行版压缩包（镜像，最快）**
 
 ```
-https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.71/dsh-deepseek-web-1.0.71.tgz
+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.72/dsh-deepseek-web-1.0.72.tgz
 ```
 
 **③ 仓库页（镜像浏览）**
@@ -47,7 +47,7 @@ https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web
 > 镜像不可用时，把上面链接里的 `https://gh-proxy.com/` 去掉即可直连 GitHub（官方速度可能较慢）：
 >
 > - 插件 spec：`https://github.com/irerc/dsh-deepseek-web`
-> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.71/dsh-deepseek-web-1.0.71.tgz`
+> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.72/dsh-deepseek-web-1.0.72.tgz`
 
 **不需要任何 API key**：插件自带 provider 配置与本地网关（`127.0.0.1:18081`），装好即用。
 
@@ -340,6 +340,18 @@ bin/cli.mjs           login/accounts/start/stop/status/doctor
 MIT License
 
 ## 更新日志
+
+### v1.0.72
+**设置面板里一半按钮「点了没反应」——不是坏了，是原生对话框被宿主掐了**
+
+手机 WebView 里 `window.prompt` / `window.confirm` 通常直接返回 `null` / `false`，不弹窗。改名、清除设备痕迹、删除、分组、清空用量这些操作全卡在这个判断上，表现就是「点了没反应」；「恢复上次登录」不用对话框，所以只有它能用。
+
+| 问题 | 以前 | 现在 |
+|---|---|---|
+| 改名 / 删除 / 分组 / 清痕迹 | `window.prompt/confirm`，WebView 里静默返回 null | 自绘弹层（同源 DOM），输入框 + 取消/确定 |
+| 打开登录页 | `window.open` 被拦 → 什么都不发生 | 拦下来就把地址摊出来，可复制、可长按 |
+| 操作结果提示 | 横幅在最上面，滚到账号卡片就看不见 | 固定在视口底部的浮层，15s 自动消失 |
+| 复制账号密码 / 导出 | 剪贴板被拦只报一句「复制失败」 | 直接把内容显示出来让你手动复制 |
 
 ### v1.0.71
 **「模型返回空」其实是被要求做人机验证**
