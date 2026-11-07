@@ -5,6 +5,7 @@ import crypto from 'node:crypto';
 import path from 'node:path';
 import { DeepSeekHttp } from './engine-http.mjs';
 import { createStreamParser } from './stream-parser.mjs';
+import { createJsonTextStreamer } from './json-stream.mjs';
 import { loadConfig, STATE_DIR } from './config.mjs';
 import { currentMode, modeLimits, guardMessage, contractFor, GUARD_MARK } from './request-mode.mjs';
 import { convLabelOf } from './conv-label.mjs';
@@ -810,6 +811,16 @@ async function handleChat(req, res) {
   // 看到开头是 { 就先缓冲，等收完再解析；解析不了就退回当纯文本。
   let jsonMode = false;
   let jsonBuf = '';
+  // 信封模式（模型按 API 格式回 JSON）也要流式：边收边把 content 解出来发给客户端。
+  let jsonStreamed = 0;
+  const jsonStream = createJsonTextStreamer((t) => {
+    if (!t) return;
+    jsonStreamed += t.length;
+    textOut += t;
+    if (!stream) return;
+    if (!headersSent) sendChunk({ role: 'assistant', content: '' });
+    sendChunk({ content: t });
+  });
   // 模型按 API 格式回复时，开头可能是 {、[，也可能裹在 ```json 里（先到的第一段只有 ```，
   // 以前只看首字符不是 { 就直接当正文流出去，用户就看到了整段 {"tool_calls":...}）。
   const looksLikeEnvelopeStart = (t) => {
@@ -825,6 +836,7 @@ async function handleChat(req, res) {
     if (!clean) return;
     if (jsonMode) {
       jsonBuf += clean;
+      try { jsonStream.push(clean); } catch {}
       return;
     }
     if (REPLY_JSON && !textOut && looksLikeEnvelopeStart(clean)) {
@@ -843,20 +855,23 @@ async function handleChat(req, res) {
     jsonMode = false;
     const raw = jsonBuf;
     jsonBuf = '';
+    try { jsonStream.end(); } catch {}
     const parsed = parseApiReply(raw, toolSchemas);
     if (process.env.DSW_DEBUG_JSON) log('[json] raw=' + raw.length + ' ' + JSON.stringify(raw.slice(0, 160)) + ' parsed=' + Boolean(parsed));
     if (!parsed) {
       // 像「回复信封」但解析不了：绝不能把原始 JSON 当正文吐给用户（那就是满屏 {"role":...}）。
       // 直接丢弃，让上层当作空回复重试。
       if (/^\s*\{\s*"(?:role|content|tool_calls|choices)"/.test(raw) || /"tool_calls"\s*:/.test(raw)) {
-        log('[json] envelope unparseable, dropped (' + raw.length + ' chars)');
+        log('[json] envelope unparseable, dropped (' + raw.length + ' chars, streamed ' + jsonStreamed + ')');
         return;
       }
-      // 不是信封（比如用户真的想要一段 JSON）：当普通文本处理
-      textOut += raw;
-      if (stream) {
-        if (!headersSent) sendChunk({ role: 'assistant', content: '' });
-        sendChunk({ content: raw });
+      // 不是信封（比如用户真的想要一段 JSON）：当普通文本处理（已流出去的部分不重复）
+      if (!jsonStreamed) {
+        textOut += raw;
+        if (stream) {
+          if (!headersSent) sendChunk({ role: 'assistant', content: '' });
+          sendChunk({ content: raw });
+        }
       }
       return;
     }
@@ -877,10 +892,12 @@ async function handleChat(req, res) {
     } else if (parsed.content) {
       const safeContent = stripSiteSafetyBlocks(parsed.content);
       parsed.content = safeContent;
-      textOut += safeContent;
-      if (stream) {
-        if (!headersSent) sendChunk({ role: 'assistant', content: '' });
-        sendChunk({ content: parsed.content });
+      if (!jsonStreamed) {
+        textOut += safeContent;
+        if (stream) {
+          if (!headersSent) sendChunk({ role: 'assistant', content: '' });
+          sendChunk({ content: parsed.content });
+        }
       }
     }
     for (const c of parsed.tool_calls) calls.push(c);

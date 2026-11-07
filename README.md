@@ -35,7 +35,7 @@ git+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web.git
 **② 发行版压缩包（镜像，最快）**
 
 ```
-https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.66/dsh-deepseek-web-1.0.66.tgz
+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.67/dsh-deepseek-web-1.0.67.tgz
 ```
 
 **③ 仓库页（镜像浏览）**
@@ -47,7 +47,7 @@ https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web
 > 镜像不可用时，把上面链接里的 `https://gh-proxy.com/` 去掉即可直连 GitHub（官方速度可能较慢）：
 >
 > - 插件 spec：`https://github.com/irerc/dsh-deepseek-web`
-> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.66/dsh-deepseek-web-1.0.66.tgz`
+> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.67/dsh-deepseek-web-1.0.67.tgz`
 
 **不需要任何 API key**：插件自带 provider 配置与本地网关（`127.0.0.1:18081`），装好即用。
 
@@ -340,6 +340,26 @@ bin/cli.mjs           login/accounts/start/stop/status/doctor
 MIT License
 
 ## 更新日志
+
+### v1.0.67
+**流式真的流起来了：JSON 信封边收边解，不再等整段回复**
+
+原因：模型回的是 `{"content":"…","tool_calls":[…]}` 这种信封，旧逻辑要等 `}` 到齐才 `JSON.parse`，然后把正文一次性发出去——前端看到的是「卡 20 秒 → 唰一下全出来」，首字延迟等于整段生成时间。
+
+现在的做法（`server/json-stream.mjs`）：
+
+| 环节 | 行为 |
+|---|---|
+| 收到 `{` | 进信封模式，同时开一个增量解包器 |
+| 扫到顶层 `"content": "` | 逐字符解转义（`\n` `\"` `\uXXXX`），解多少发多少 |
+| 转义被切开发 | 攒够 2/6 个字符再吐，不会漏出半截 `\u4e` |
+| `tool_calls` 等其它字段 | 完全不碰，收尾统一 `JSON.parse` |
+| 收尾 | 已流出去的不再重发；解析失败也不重复 |
+| 非信封（用户真要一段 JSON） | 照旧整段返回，不误伤 |
+
+顺带把契约收紧了一句：**要调工具的那一轮 `content` 必须是 `null`**——原来模型爱写「我先看看」，关掉过程话时那段已经被流出去收不回来了，现在从源头就不生成。
+
+测试：新增 `json-stream` 一套（整段/3 字符切分/逐字符/`content` 在 `tool_calls` 之后/半截 JSON/结尾半个转义），11 套全过。
 
 ### v1.0.66
 **浏览器起不来时不再只给一段红字：三个一键走法 + 日志折叠**

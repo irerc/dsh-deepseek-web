@@ -114,7 +114,7 @@ export function guardMessage() {
 /** 回复格式约定：两种模式共用骨架，保险模式多一句「先自检是否符合使用规范」 */
 export function contractFor(mode, replyJson) {
   const base = replyJson
-    ? '回复以 JSON 对象承载：content 写正文（或 null），tool_calls 写工具调用及其 arguments。调用工具时 arguments 要含全部必填参数，类型按 tools 的 schema（数字/布尔用裸值）；不需要工具就不写 tool_calls。不要代码块，不要额外说明。'
+    ? '回复以 JSON 对象承载：content 写正文（或 null），tool_calls 写工具调用及其 arguments。要调用工具的那一轮，content 必须是 null（不要写「我先看看」这类过程话）。调用工具时 arguments 要含全部必填参数，类型按 tools 的 schema（数字/布尔用裸值）；不需要工具就不写 tool_calls。不要代码块，不要额外说明。'
     : '你是 OpenAI 兼容服务端。正常回答直接给正文；需要调用工具时只输出：@@TOOL@@\n{"name":"工具名","arguments":{}}\n@@END@@';
   return {
     role: 'system',
