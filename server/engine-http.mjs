@@ -2,13 +2,14 @@
 import { BASE, UA, post, get, classify, UpstreamError, baseHeaders } from './http.mjs';
 import { solvePowHeader } from './pow.mjs';
 import { loadConfig } from './config.mjs';
-import { currentMode, modeLimits, gapFor, rateWindowFor, LONG_RUN_THRESHOLD, longRestFor, throttleBackoffMs } from './request-mode.mjs';
+import { currentMode, modeLimits, gapFor, rateWindowFor, LONG_RUN_THRESHOLD, HUMAN_BREAK_MS, longRestFor, throttleBackoffMs } from './request-mode.mjs';
 import { pickAccount, markUsed, markCooldown, setCooldown, markAuthExpired, markMuted, listAccounts, getToken, getCookie, getFingerprint } from './accounts.mjs';
 import { reloginAccount } from './relogin.mjs';
 import { createStreamParser } from './stream-parser.mjs';
 import { probeToken } from './token-check.mjs';
 
-const lastSentAt = new Map(); // accountId -> timestamp
+const lastSentAt = new Map(); // accountId -> 上一次请求「开始」时间
+const lastDoneAt = new Map(); // accountId -> 上一次请求「结束」时间（间隔要按结束算，长回答之后不必白等，但必须等满）
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
@@ -151,11 +152,15 @@ export class DeepSeekHttp {
    * 三层节奏（从轻到重）：随机间隔 → 滚动窗口限速 → 连续多轮后长休。
    */
   async pace(accountId) {
-    const { sendGapMs } = loadConfig();
+    const { sendGapMs, sendGapMaxMs } = loadConfig();
     const mode = currentMode();
-    // 保险模式至少间隔 4 秒、抖动更长；原始模式按配置走
-    const gap = gapFor(sendGapMs, mode);
-    const last = lastSentAt.get(accountId) || 0;
+    // 间隔是「区间内随机」而不是固定值：固定间隔方差≈0，统计上就是定时器特征
+    const gap = gapFor(sendGapMs, mode, sendGapMaxMs);
+    // 间隔按「上一次请求结束」起算：长回答（几十秒）之后不该再白等，
+    // 但也不能「开始时算一次就够」—— 那样长回答等于把间隔吃掉了，密集感又回来了。
+    const last = Math.max(lastSentAt.get(accountId) || 0, lastDoneAt.get(accountId) || 0);
+    // 距上一次请求超过 10 分钟 = 人歇过了，连续计数清零（否则长休可能永远触发不到）
+    if (last > 0 && Date.now() - last > HUMAN_BREAK_MS) this._consecutive = 0;
     let wait = last + gap - Date.now();
     // 一、连续跑了十几轮：插一次长休。真人不会一口气几十条，机器味也是账号级限流的诱因
     if (this._consecutive >= LONG_RUN_THRESHOLD && this._lastDoneAt > 0) {
@@ -228,6 +233,7 @@ export class DeepSeekHttp {
         markUsed(account.id);
         this._consecutive += 1;
         this._lastDoneAt = Date.now();
+        lastDoneAt.set(account.id, this._lastDoneAt);
         return { ...out, accountId: account.id };
       } catch (error) {
         lastError = error;

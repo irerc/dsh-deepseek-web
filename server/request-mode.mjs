@@ -14,7 +14,7 @@ export const MODE_INFO = {
   safe: {
     key: 'safe',
     label: '保险模式',
-    hint: '提示词最前面插入一段「使用规范」（违法违规 / 攻击性内容礼貌拒绝），工具描述压到 200 字、历史预算约 48k；同账号严格串行、发送间隔至少 4 秒。更不容易触发站点风控与禁言。',
+    hint: '提示词最前面插入一段「使用规范」（违法违规 / 攻击性内容礼貌拒绝），工具描述压到 200 字、历史预算约 48k；同账号严格串行、发送间隔 5~8 秒随机区间、30 分钟窗口内次数更少。更不容易触发站点风控与禁言。',
   },
 };
 
@@ -53,15 +53,19 @@ export function modeLimits(mode) {
   };
 }
 
-/** 同一账号两次请求的间隔；保险模式有 4 秒下限，抖动也更长（更像真人） */
-export function gapFor(baseMs, mode) {
+/**
+ * 同一账号两次请求的间隔：**在 [min, max] 里随机取**，而不是固定值乘一个抖动系数。
+ *
+ * 为什么必须随机区间：固定间隔的方差≈0，服务端一行统计就能看出「定时器」；
+ * 真人打字/思考的间隔是有方差的。参考实现（以及从未被风控的 cuckoo-code）用的都是随机区间。
+ * 保险模式给更高的下限（5 秒起），原始模式按配置区间走。
+ */
+export function gapFor(baseMs, mode, maxMs = null) {
   const safe = isSafe(mode);
-  const base = Math.max(0, Number(baseMs) || 0);
-  const gap = Math.max(base, safe ? 4000 : 0);
-  const jitter = safe ? 1 + Math.random() * 0.6 : 0.8 + Math.random() * 0.4;
-  // 只做「间隔抖动」，不额外插随机长停顿：长尾节奏交给滚动窗口限速和连续轮次长休
-  // （那两处是真正对付账号级限流的地方，也不会让每次回复莫名多等几秒）。
-  return Math.round(gap * jitter);
+  const min = Math.max(Math.max(0, Number(baseMs) || 0), safe ? 5000 : 0);
+  const rawMax = maxMs === null || maxMs === undefined ? min + (safe ? 3000 : 2000) : Math.max(0, Number(maxMs) || 0);
+  const max = Math.max(min, rawMax);
+  return Math.round(min + Math.random() * (max - min));
 }
 
 /**
@@ -70,13 +74,27 @@ export function gapFor(baseMs, mode) {
  * 超出窗口就等下一次空位，宁可用户多等几秒，也别把账号打进冷却。
  */
 export function rateWindowFor(mode) {
-  return isSafe(mode) ? { windowMs: 10 * 60 * 1000, max: 8 } : { windowMs: 10 * 60 * 1000, max: 16 };
+  let windowMs = 30 * 60 * 1000;
+  let max = 20;
+  try {
+    const cfg = loadConfig();
+    windowMs = Math.max(60000, Number(cfg.rateWindowMs) || windowMs);
+    max = Math.max(0, Number(cfg.rateMaxInWindow) || 0);
+  } catch {}
+  // 保险模式再压一档（同一时间窗允许的次数更少）；0 = 关闭窗口限速（不建议）
+  return { windowMs, max: isSafe(mode) && max > 0 ? Math.max(1, Math.round(max * 0.6)) : max };
 }
 
-/** 连续请求多少轮后插一次长休；长休区间（毫秒） */
-export const LONG_RUN_THRESHOLD = 10;
+/**
+ * 「连续多少轮」才叫一口气，以及长休多久。
+ * 参考实现的实测结论：阈值 15 轮、长休 60~180 秒；
+ * 「距上次请求超过 10 分钟」才算人歇过 —— 否则「十几发一波、隔一两分钟再来一波」
+ * 会把计数器洗掉，长休永远不触发（那次会话吊销就是这么发生的）。
+ */
+export const LONG_RUN_THRESHOLD = 15;
+export const HUMAN_BREAK_MS = 10 * 60 * 1000;
 export function longRestFor() {
-  return { min: 25000, max: 70000 };
+  return { min: 60000, max: 180000 };
 }
 
 /**

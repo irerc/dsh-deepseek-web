@@ -16,7 +16,10 @@ export const CONFIG_FILE = path.join(STATE_DIR, 'config.json');
 export const DEFAULTS = {
   autoStart: true, // 首次调用时自动拉起引擎
   idleStopMs: 10 * 60 * 1000, // 空闲多久关停引擎
-  sendGapMs: 1200, // 同一账号两次请求的最小间隔
+  // 同一账号两次请求的间隔：**随机区间**（min~max）。固定间隔方差≈0，统计上就是「定时器特征」，
+  // 真人打字不是等距的 —— 参考实现用 2000~4000ms 随机区间（cuckoo-code 从未被风控）。
+  sendGapMs: 2500,
+  sendGapMaxMs: 4500,
   // 请求模式：raw 原始（提示词原样、不加额外说明）| safe 保险（提示词里插使用规范 + 更慢更保守）
   requestMode: 'raw',
   maxConcurrency: 4, // 全局并发上限
@@ -38,6 +41,10 @@ export const DEFAULTS = {
   probeIntervalMs: 30 * 60 * 1000,
   // 当前账号：下一轮请求优先用它（账号库里的「设为当前账号」）
   activeAccountId: '',
+  // 滚动窗口限速：这段时间内最多发这么多次，超了就长休（小间隙洗不掉这个计数）。
+  // 参考实现默认「30 分钟最多 20 次」—— 实测被吊销那晚是 22:31→22:53 共 49 次、间隔 8~12 秒。
+  rateWindowMs: 30 * 60 * 1000,
+  rateMaxInWindow: 20,
   // 失效 / 被限流时自动换号。保持原来的行为（开着）；想学参考插件那样更保守可以关掉
   autoSwitch: true,
   // 定时换号间隔（分钟，0 = 关闭）
@@ -94,6 +101,9 @@ export function loadConfig() {
   const cfg = { ...DEFAULTS, ...saved };
   cfg.sectionOrder = normalizeSectionOrder(cfg.sectionOrder);
   if (process.env.DS_SEND_GAP_MS) cfg.sendGapMs = Number(process.env.DS_SEND_GAP_MS);
+  if (process.env.DS_SEND_GAP_MAX_MS) cfg.sendGapMaxMs = Number(process.env.DS_SEND_GAP_MAX_MS);
+  if (process.env.DS_RATE_WINDOW_MIN) cfg.rateWindowMs = Number(process.env.DS_RATE_WINDOW_MIN) * 60000;
+  if (process.env.DS_RATE_MAX_IN_WINDOW) cfg.rateMaxInWindow = Number(process.env.DS_RATE_MAX_IN_WINDOW);
   if (process.env.DS_MAX_CONCURRENCY) cfg.maxConcurrency = Number(process.env.DS_MAX_CONCURRENCY);
   if (process.env.DS_REQUEST_MODE) cfg.requestMode = String(process.env.DS_REQUEST_MODE);
   return cfg;
@@ -117,6 +127,10 @@ export function saveConfig(patch) {
     if (next[key] !== undefined) clean[key] = next[key];
   }
   clean.sendGapMs = Math.max(0, Math.min(60000, Number(clean.sendGapMs) || 0));
+  clean.sendGapMaxMs = Math.max(0, Math.min(120000, Number(clean.sendGapMaxMs) || 0));
+  if (clean.sendGapMaxMs < clean.sendGapMs) clean.sendGapMaxMs = clean.sendGapMs;
+  clean.rateWindowMs = Math.max(60000, Math.min(12 * 3600 * 1000, Number(clean.rateWindowMs) || DEFAULTS.rateWindowMs));
+  clean.rateMaxInWindow = Math.max(0, Math.min(600, Number(clean.rateMaxInWindow) || 0));
   clean.requestMode = ['raw', 'safe'].includes(clean.requestMode) ? clean.requestMode : 'raw';
   clean.idleStopMs = Math.max(60000, Math.min(24 * 3600 * 1000, Number(clean.idleStopMs) || DEFAULTS.idleStopMs));
   clean.maxConcurrency = Math.max(1, Math.min(16, Number(clean.maxConcurrency) || DEFAULTS.maxConcurrency));

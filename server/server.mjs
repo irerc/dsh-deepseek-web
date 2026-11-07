@@ -68,8 +68,39 @@ const MAX_PROMPT_CHARS = Number(process.env.DSW_MAX_PROMPT_CHARS || 330000);
 // 否则 pi-ai 会把「成功返回」误判成上下文溢出（见 server/usage.mjs 顶部注释）。
 const CONTEXT_WINDOW = Number(process.env.DSW_CONTEXT_WINDOW || 131072);
 
+// ------------------------------------------------------------ 提示词瘦身
+// 参考实现 2.3.8/2.3.9 的结论：DSH 每轮把整份技能目录塞进 system-reminder，45 条 ≈ 11k 字符，
+// 是首屏提示词里最大的一块。技能目录只是「发现入口」，模型真正加载靠 skill 工具 ——
+// 所以只留名字即可（省 90%+），不必逐条发摘要。
+//   DSW_WEB_STRIP_SKILLS=names（默认）| off（原样）| all（整块删掉）
+const STRIP_SKILLS = String(process.env.DSW_WEB_STRIP_SKILLS || 'names').toLowerCase();
+// 工具描述上限：宿主给的单个工具描述能到两千字符（shell 那个把沙箱规则全写进去），
+// 逐字照发既费 token 也稀释格式指令。DSW_WEB_COMPACT_TOOLS=0 回到逐字照发。
+const COMPACT_TOOLS = process.env.DSW_WEB_COMPACT_TOOLS !== '0';
+const TOOL_DESC_CAP = Number(process.env.DSW_WEB_TOOL_DESC_CHARS || 220);
+
+function compressSkillsCatalog(text) {
+  if (!text || STRIP_SKILLS === 'off') return text;
+  const re = /<available_skills>([\s\S]*?)<\/available_skills>/g;
+  if (!re.test(text)) return text;
+  re.lastIndex = 0;
+  return text.replace(re, (_m, inner) => {
+    if (STRIP_SKILLS === 'all') return '';
+    const names = [];
+    for (const line of String(inner).split('\n')) {
+      const m = /^\s*[-*]\s*`([^`]+)`/.exec(line);
+      if (m) names.push(m[1].trim());
+    }
+    if (!names.length) return inner.trim();
+    return (
+      'Skills (names only — call the `skill` tool with one exact name to load it): ' +
+      names.join(', ')
+    );
+  });
+}
+
 function sanitizePrompt(text) {
-  return String(text || '')
+  return compressSkillsCatalog(String(text || ''))
     .replace(/<acp[^>]*>[\s\S]*?<\/acp>/g, '')
     .replace(/<acp[^>]*\/>/g, '')
     .replace(/^\[model changed:[^\]]*\]\s*$/gm, '')
@@ -196,7 +227,27 @@ function buildApiPrompt(list, tools, opts = {}) {
     return out;
   };
 
-  const shrink = (desc, mode) => (mode === 'full' ? String(desc || '') : String(desc || '').slice(0, mode === 'compact' ? 300 : 120));
+  // 工具描述上限：compact 开启时不再逐字照发（full 也从 3200 压到 220），
+  // 参数说明也不再逐行发 —— 名字 + 类型 + `?` 在签名里已经有了。
+  const descCap = (mode) => {
+    if (!COMPACT_TOOLS) return mode === 'full' ? 3200 : mode === 'compact' ? 300 : 120;
+    return mode === 'full' ? TOOL_DESC_CAP : mode === 'compact' ? 160 : 80;
+  };
+  const shrink = (desc, mode) => String(desc || '').replace(/\s+/g, ' ').slice(0, descCap(mode));
+  // 参数 schema 瘦身：只压「说明文字」，属性名/类型/必填一个不少（否则模型拼不出合法参数）。
+  // sandbox_permissions / justification 只在被拒后才用，描述每个约 120 字符 —— 直接不留描述。
+  const META_ARGS = new Set(['sandbox_permissions', 'justification']);
+  const trimSchema = (schema, cap) => {
+    if (!schema || typeof schema !== 'object' || !schema.properties) return schema;
+    const props = {};
+    for (const [k, v] of Object.entries(schema.properties)) {
+      const one = v && typeof v === 'object' ? { ...v } : { type: typeof v === 'string' ? v : 'string' };
+      if (META_ARGS.has(k)) delete one.description;
+      else if (typeof one.description === 'string') one.description = one.description.replace(/\s+/g, ' ').slice(0, cap);
+      props[k] = one;
+    }
+    return { ...schema, properties: props };
+  };
   const buildTools = (mode) =>
     (tools || [])
       .map((t) => {
@@ -210,7 +261,9 @@ function buildApiPrompt(list, tools, opts = {}) {
                 properties: Object.fromEntries(Object.keys(schema.properties || {}).map((k) => [k, { type: 'string' }])),
                 required: Array.isArray(schema.required) ? schema.required : [],
               }
-            : schema;
+            : COMPACT_TOOLS
+              ? trimSchema(schema, mode === 'compact' ? 40 : 60)
+              : schema;
         return { type: 'function', function: { name: f.name, description: shrink(f.description, mode), parameters: params } };
       })
       .filter(Boolean);
@@ -411,8 +464,26 @@ function parseDsmlToolCalls(raw, schemas) {
   return { name, arguments: JSON.stringify(args) };
 }
 
+/**
+ * 剥掉站点注入的安全分类块。
+ * 真机实测：回复正文里会冒出 `<ds_safety>…[判定]…[规则无</ds_safety>Safe` —— 网页端的安全
+ * 分类被当正文吐出来，那一轮既没有工具调用也没有回答（界面看着「停下来了」）。
+ * 顺序很关键：这块里**没有 "DSML" 字样**，所以必须在任何「不是 DSML 就早退」之前剥掉。
+ */
+function stripSiteSafetyBlocks(t) {
+  if (!t || !/<\/?\s*ds_[a-z_]/i.test(t)) return t;
+  let out = t
+    .replace(/<ds_[a-z0-9_]*>[\s\S]*?<\/ds_[a-z0-9_]*>/gi, '')
+    .replace(/<ds_[a-z0-9_]*>[\s\S]*$/i, '')
+    .replace(/<\/?\s*ds_[a-z0-9_]*[^>]*>/gi, '');
+  // 半截残片（收尾那几个字）与紧跟的安全标记尾巴
+  out = out.replace(/\[?规则无\]?\s*$/g, '').replace(/\s*\bSafe\b\s*$/g, '');
+  return out;
+}
+
 function stripSentinels(t) {
   if (!t) return t;
+  t = stripSiteSafetyBlocks(t);
   const hadDsml = /DSML/i.test(t) || /[|｜]{2}\s*(?:calls|invoke|parameter)\b/i.test(t);
   let out = t
     .replace(/<[|｜]+\s*\/?\s*DSML\s*[|｜][^>]*>/gi, '')
@@ -702,7 +773,9 @@ async function handleChat(req, res) {
     if (parsed.content && narrationOff) {
       log('[json] hidden process narration before tool call (' + parsed.content.trim().length + ' chars)');
     } else if (parsed.content) {
-      textOut += parsed.content;
+      const safeContent = stripSiteSafetyBlocks(parsed.content);
+      parsed.content = safeContent;
+      textOut += safeContent;
       if (stream) {
         if (!headersSent) sendChunk({ role: 'assistant', content: '' });
         sendChunk({ content: parsed.content });
@@ -1391,6 +1464,10 @@ if (process.env.DSW_SELFTEST_PROMPT) {
     const parsed = parseDsmlToolCalls(spec.dsml, schemas);
     console.log('parsed:', JSON.stringify(parsed));
     console.log('stripped:', JSON.stringify(stripSentinels(spec.dsml)));
+    process.exit(0);
+  }
+  if (spec.safety !== undefined) {
+    console.log('stripped:', JSON.stringify(stripSentinels(spec.safety)));
     process.exit(0);
   }
   const prompt = buildApiPrompt(spec.messages || [], spec.tools || [], spec.mode ? { mode: spec.mode } : {});
