@@ -35,7 +35,7 @@ git+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web.git
 **② 发行版压缩包（镜像，最快）**
 
 ```
-https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.63/dsh-deepseek-web-1.0.63.tgz
+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.64/dsh-deepseek-web-1.0.64.tgz
 ```
 
 **③ 仓库页（镜像浏览）**
@@ -47,7 +47,7 @@ https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web
 > 镜像不可用时，把上面链接里的 `https://gh-proxy.com/` 去掉即可直连 GitHub（官方速度可能较慢）：
 >
 > - 插件 spec：`https://github.com/irerc/dsh-deepseek-web`
-> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.63/dsh-deepseek-web-1.0.63.tgz`
+> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.64/dsh-deepseek-web-1.0.64.tgz`
 
 **不需要任何 API key**：插件自带 provider 配置与本地网关（`127.0.0.1:18081`），装好即用。
 
@@ -109,7 +109,7 @@ dsh-deepseek-web doctor
 | Cookie | 页面自己的 jar | 登录时抓的 cookie 原样回放 | 接近，但不会像页面那样滚动更新 |
 | 是谁在发包 | 人开着浏览器 | v1.0.63 起可切「手机浏览器」档：直接接管手机上那台真 Chrome 的调试端口 | 可选，默认关 |
 | 账号前几条消息 | 先打招呼再谈正事 | 登录后先闲聊 1~2 句（可关） | 已做 |
-| 节奏（间隔/打字/作息/走神/每日上限） | 人的节奏 | 人类节律默认开 | 已做 |
+| 节奏（间隔/打字/作息/走神/每日上限） | 人的节奏 | 人类节律默认开；打字间隔自 v1.0.64 起为对数正态逐字模型 | 已做 |
 | 设备关联 | 一台设备一套身份 | 「清除设备痕迹」换新 UUID / 清指纹 / 清计数 | 可选；治设备关联，不治账号历史 |
 | 会话复用 | 同一条对话 | 复用 `chat_session_id` 续聊 | 一致 |
 | `accept-encoding` | `gzip, deflate, br, zstd` | 由底层库决定（Node 只发 gzip/deflate） | **残留**：为不让解压失败打断对话，没有强行伪造 |
@@ -339,6 +339,25 @@ bin/cli.mjs           login/accounts/start/stop/status/doctor
 MIT License
 
 ## 更新日志
+
+### v1.0.64
+**界面瘦身 + 「像人一样」亮到明面 + 打字节奏换成对数正态（参考开源人化库）**
+
+一、**账号页不再吃掉半屏**
+- 每个账号默认只有「检查」「更多」两个按钮；原来三行元信息（来源 / 登录时间 / cookie 项数）收进「更多」；
+- 「更多」面板从「一行行大按钮」改成紧凑网格（约 88px 一格，小号字），展开也不占几行；
+- 「添加账号」整块改成可折叠：没账号时自动展开，有账号时默认收起，标题写清里面有什么（登录线路 / 登录方式 / 内嵌窗口 / 邮箱密码）。
+
+二、**「像人一样」一行说清**
+账号区顶部新增一行状态：`像人一样：节律开 · 闲聊 2 句 · 本地伪装`。三个关键开关（人类节律、登录后先闲聊、出站传输）不用再点进「运行」里翻。
+
+三、**打字节奏 v2：对数正态逐字累加**
+旧实现是「整体一个随机字速」，方差形状不像人。现在按 [humanization-playwright](https://github.com/zvadizz01/humanization-playwright) 的做法改：
+- 每个字的间隔取**对数正态**（中位 ~285ms，尾部能到 1s+），逐字累加；
+- 标点后额外停 180~600ms（选词 / 想下一句），空格与换行停 60~220ms；
+- 整段再叠一次 8% 概率的「犹豫」（+0.6~2.5s）；
+- 发送前「读一遍」的停顿保留。
+效果：100 字的中位耗时 20~45s（约 2.2~5 字/秒），样本有真实抖动，而不是每次都在 27 秒附近。
 
 ### v1.0.63
 **真·手机浏览器档位 + 登录后闲聊热身 + 一键清除设备痕迹**

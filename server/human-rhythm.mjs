@@ -55,13 +55,41 @@ export function isQuietHour(now = Date.now(), tzOffsetMin = null) {
   return h >= 1 && h < 6.5;
 }
 
-/** 打这么多字要多久（毫秒）。确定性可测：给出 rng 就是可复现的。 */
+/** 一个标准正态（Box-Muller），只用来做打字节奏的抖动 */
+function gauss(rng) {
+  let u = 0;
+  let v = 0;
+  while (u === 0) u = rng();
+  while (v === 0) v = rng();
+  return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+}
+
+/**
+ * 打这么多字要多久（毫秒）。
+ *
+ * v1（旧）：整体一个随机 cps → 每次都像「匀速匀速匀速」，方差形状不像人。
+ * v2（现在）：逐字累加，单字间隔取对数正态（右偏：常见 200~350ms，偶尔卡到 1s+），
+ * 遇到标点/空格额外停一下（选词、换行、想下一句），整段再叠一次「犹豫」。
+ * 这套形状参考了开源的人化库（humanization-playwright 的可变速度 + 空格后停顿 + 犹豫；
+ * 见 https://github.com/zvadizz01/humanization-playwright ）。
+ * 确定性可测：给出 rng 就是可复现的。
+ */
 export function typingMs(chars, rng = Math.random) {
   const n = Math.max(0, Number(chars) || 0);
   if (n <= 0) return 0;
-  const cps = CPS_MIN + rng() * (CPS_MAX - CPS_MIN);
+  // 中位 285ms/字、对数正态 σ=0.5 → 大多数 180~450ms，尾部到 1s+
+  const median = 285;
+  let total = 0;
+  const text = String(chars);
+  for (let i = 0; i < Math.min(n, 4000); i++) {
+    total += median * Math.exp(0.5 * gauss(rng));
+    const ch = text.length >= n ? text[i] : '';
+    if (ch && '，。！？；：,.!?;:'.includes(ch)) total += 180 + rng() * 420; // 标点后想一下
+    else if (ch === ' ' || ch === '\n') total += 60 + rng() * 160; // 换行/空格
+  }
+  if (rng() < 0.08) total += 600 + rng() * 1900; // 整段犹豫一次
   const pre = PRE_SEND_MIN + rng() * (PRE_SEND_MAX - PRE_SEND_MIN);
-  return Math.min(TYPING_CAP, Math.round((n / cps) * 1000 + pre));
+  return Math.min(TYPING_CAP, Math.round(total + pre));
 }
 
 /** 走神停顿：默认 5% 概率，8~75 秒。 */
