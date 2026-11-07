@@ -35,7 +35,7 @@ git+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web.git
 **② 发行版压缩包（镜像，最快）**
 
 ```
-https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.73/dsh-deepseek-web-1.0.73.tgz
+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.74/dsh-deepseek-web-1.0.74.tgz
 ```
 
 **③ 仓库页（镜像浏览）**
@@ -47,7 +47,7 @@ https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web
 > 镜像不可用时，把上面链接里的 `https://gh-proxy.com/` 去掉即可直连 GitHub（官方速度可能较慢）：
 >
 > - 插件 spec：`https://github.com/irerc/dsh-deepseek-web`
-> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.73/dsh-deepseek-web-1.0.73.tgz`
+> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.74/dsh-deepseek-web-1.0.74.tgz`
 
 **不需要任何 API key**：插件自带 provider 配置与本地网关（`127.0.0.1:18081`），装好即用。
 
@@ -340,6 +340,17 @@ bin/cli.mjs           login/accounts/start/stop/status/doctor
 MIT License
 
 ## 更新日志
+
+### v1.0.74
+**「重新登录」默认走浏览器登录**
+
+登录失效账号上那颗蓝底按钮，点击后直接调 `浏览器登录`：真实浏览器打开登录页，你手动登一次，token 原地回填。内嵌窗口只在浏览器那条打不开时才作为兜底——WebView 里内嵌登录经常白屏，反而更慢。
+
+| 情况 | 行为 |
+|---|---|
+| 正常 | 系统浏览器/新标签页打开登录页 |
+| 宿主拦了 `window.open` | 把地址摊出来（可复制/长按），照样能登 |
+| 浏览器那条失败 | 自动退回内嵌登录窗口 |
 
 ### v1.0.73
 **登录失效的账号直接把「重新登录」摆出来；账号列表按「当前 → 可用 → 不可用」排**
