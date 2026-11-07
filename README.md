@@ -35,7 +35,7 @@ git+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web.git
 **② 发行版压缩包（镜像，最快）**
 
 ```
-https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.76/dsh-deepseek-web-1.0.76.tgz
+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.77/dsh-deepseek-web-1.0.77.tgz
 ```
 
 **③ 仓库页（镜像浏览）**
@@ -47,7 +47,7 @@ https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web
 > 镜像不可用时，把上面链接里的 `https://gh-proxy.com/` 去掉即可直连 GitHub（官方速度可能较慢）：
 >
 > - 插件 spec：`https://github.com/irerc/dsh-deepseek-web`
-> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.76/dsh-deepseek-web-1.0.76.tgz`
+> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.77/dsh-deepseek-web-1.0.77.tgz`
 
 **不需要任何 API key**：插件自带 provider 配置与本地网关（`127.0.0.1:18081`），装好即用。
 
@@ -340,6 +340,21 @@ bin/cli.mjs           login/accounts/start/stop/status/doctor
 MIT License
 
 ## 更新日志
+
+### v1.0.77
+**登录页减负：一颗主按钮，其余折进「更多登录方式」**
+
+以前的「账号」页第一屏堆了 4 行按钮（自动/推荐徽章、登录线路、登录方式、打开浏览器/系统浏览器、Apple），手机上几乎占满一屏。
+
+| 以前 | 现在 |
+|---|---|
+| 自动 / 推荐 两个徽章 + 说明 | 去掉，改成两行说人话的提示 |
+| 登录线路（自动/国内/英文页） | 折进「更多登录方式」 |
+| 登录方式四连（内嵌/浏览器/粘贴/邮箱密码） | 折进「更多登录方式」 |
+| Apple 登录、手动添加、批量导入 | 折进「更多登录方式」 |
+| 主操作混在按钮堆里 | 顶部一颗蓝色大按钮「登录（打开浏览器）」 |
+
+折叠区默认收起，要换路线/粘贴 token 再点开；内嵌窗口打开时仍然自动显示在下方。
 
 ### v1.0.76
 **账号级设备隔离：一个号被封，不再牵连这台机器上的其它号**
