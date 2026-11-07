@@ -35,7 +35,7 @@ git+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web.git
 **② 发行版压缩包（镜像，最快）**
 
 ```
-https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.59/dsh-deepseek-web-1.0.59.tgz
+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.60/dsh-deepseek-web-1.0.60.tgz
 ```
 
 **③ 仓库页（镜像浏览）**
@@ -47,7 +47,7 @@ https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web
 > 镜像不可用时，把上面链接里的 `https://gh-proxy.com/` 去掉即可直连 GitHub（官方速度可能较慢）：
 >
 > - 插件 spec：`https://github.com/irerc/dsh-deepseek-web`
-> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.59/dsh-deepseek-web-1.0.59.tgz`
+> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.60/dsh-deepseek-web-1.0.60.tgz`
 
 **不需要任何 API key**：插件自带 provider 配置与本地网关（`127.0.0.1:18081`），装好即用。
 
@@ -89,6 +89,7 @@ dsh-deepseek-web doctor
 
 - 每个账号的请求串行；两次请求之间的间隔**在随机区间里取**（默认 2500~4500ms，设置页可调），失败会退避。
 - 三层节奏闸门：随机间隔 → **滚动窗口限速**（默认 30 分钟最多 20 次）→ **长任务长休**（连续 15 轮后歇 60~180 秒；距上次请求超过 10 分钟才算「人歇过了」，计数才清零）。
+- **人类节律（默认开）**：再叠一层「像人」的行为 —— ①间隔按本轮**消息字数**加打字时间（3.4 字/秒 + 发送前停顿，45 秒封顶：真人不会 2000 字一秒打完）；②按本地作息放大深夜间隔（01:00~06:30 系数再乘 2.6，凌晨三点持续活跃是最刺眼的机器特征）；③每轮 5% 概率插入 8~75 秒**走神停顿**；④每账号 **24 小时滑动窗口条数上限**（默认 240，超了直接停住报错，**不换号硬闯** —— 换号恰好最像「多开小号轮换」）。四项都可在「运行设置」里关。
 - 429 → 该账号冷却 60s 起指数退避（上限 10min）并切下一个账号。
 - 401 → 若该账号保存了密码，先自动重新登录并把新 token 换到原账号（同一账号原地续跑，不打断对话）；没存密码或重登失败才标记「登录失效」。
 - 指定账号：模型名写 `deepseek-chat@工作号` 即可固定到某个账号。
@@ -240,7 +241,10 @@ dsh-deepseek-web doctor
 | saveLoginCredential | true | 登录成功时把登录表单里的邮箱+密码加密保存在本机（下次自动填表 / token 失效自动重登）；关掉则不保存 |
 | autoRelogin | true | token 失效时用保存的账号密码自动重新登录 |
 | requestMode | raw | 请求模式：`raw` 原始（提示词原样）/ `safe` 保险（插使用规范 + 更慢更保守） |
-| transport | browser | 传输层：`browser` 真实浏览器页面发请求（TLS 指纹 = 浏览器，PoW 在页面里解）/ `node` 直连（高级选项，高危） |
+| transport | auto | 传输层：`auto` 真实浏览器 → 本地伪装（curl_cffi）→ Node 直连 / `browser` 只许真实浏览器 / `native` 本地伪装 / `node` 直连（高级选项，高危） |
+| humanRhythm | true | 人类节律：打字时间 + 作息曲线 + 走神停顿（关掉只保留纯随机间隔） |
+| dailyMsgs | 240 | 每账号 24 小时滑动窗口发送上限，超了停住报错；0 = 不限 |
+| nightQuiet | true | 01:00~06:30 自动把间隔放大（真人要睡觉） |
 | autoSwitch | false | 账号失效/被限流时是否自动换下一个号（**默认关**；开了就是旧行为，机器特征明显） |
 | sectionOrder | usage,ledger,engine,accounts,addAccount,sessions,diagnostics | 设置页卡片顺序，由最下方「页面设置」的 ↑/↓ 调整 |
 
@@ -303,6 +307,24 @@ bin/cli.mjs           login/accounts/start/stop/status/doctor
 MIT License
 
 ## 更新日志
+
+### v1.0.60
+**人类节律：把「等距定时器」变成「有作息、要打字、偶尔走神的人」**
+
+风控的主判据不是指纹，是行为统计。这一版把行为层补上（默认开，可关）：
+
+| 维度 | 做法 | 为什么 |
+|---|---|---|
+| 打字时间 | 间隔按本轮消息字数增加（3.4 字/秒 + 发送前停顿，45s 封顶） | 真人不会 2000 字一秒打完；「长提示词秒发」是最容易被抓的模式 |
+| 作息曲线 | 本地时间 01:00~06:30 间隔再 ×2.6，凌晨 3 点系数最低 | 24 小时均匀发包的账号一眼就是机器 |
+| 走神停顿 | 每轮 5% 概率插入 8~75 秒 | 真人会去看别的窗口 |
+| 每日上限 | 每账号 24h 滑动窗口默认 240 条，超了**报错停住** | 真人有「今天问够了」的边界；换号硬闯才像多开小号 |
+
+同时给 native / node 两条路补上 Chrome 页内 fetch 才有的一组头：`sec-ch-ua`（与 UA / impersonate 同为 Chrome 131）、`sec-ch-ua-mobile: ?1`、`sec-ch-ua-platform: "Android"`、`sec-fetch-site/mode/dest`、`accept: */*`、`accept-language`。浏览器档不动（由 Chrome 自己生成）。
+
+设置页只加一行：「人类节律」勾选 + 「每日上限 N 条/24h」，默认开。
+
+**边界不变**：这套东西只降低「被统计特征识别」的概率，不构成不会被封的保证。
 
 ### v1.0.59
 **界面简化为「一个档位 + 一个按钮」**

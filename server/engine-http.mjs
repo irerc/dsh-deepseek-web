@@ -1,9 +1,10 @@
 // HTTP 引擎：不依赖浏览器，直接用 chat.deepseek.com 的网页接口
-import { BASE, UA, post, get, classify, UpstreamError, baseHeaders } from './http.mjs';
+import { BASE, UA, post, get, classify, UpstreamError, baseHeaders, humanHeaders } from './http.mjs';
 import { solvePowHeader } from './pow.mjs';
 import { loadConfig } from './config.mjs';
 import { currentMode, modeLimits, gapFor, rateWindowFor, LONG_RUN_THRESHOLD, HUMAN_BREAK_MS, longRestFor, throttleBackoffMs } from './request-mode.mjs';
 import { pickAccount, markUsed, markCooldown, setCooldown, markAuthExpired, markMuted, listAccounts, getToken, getCookie, getFingerprint } from './accounts.mjs';
+import { humanGapPlan, checkDailyBudget, recordHumanSend } from './human-rhythm.mjs';
 import { reloginAccount } from './relogin.mjs';
 import { createStreamParser } from './stream-parser.mjs';
 import { BrowserTransport, browserAvailability } from './browser-transport.mjs';
@@ -243,17 +244,45 @@ export class DeepSeekHttp {
    * 等一个账号的发送间隔，保证不紧贴着打上游。
    * 三层节奏（从轻到重）：随机间隔 → 滚动窗口限速 → 连续多轮后长休。
    */
-  async pace(accountId) {
-    const { sendGapMs, sendGapMaxMs } = loadConfig();
+  async pace(accountId, typedChars = 0) {
+    const cfg0 = loadConfig();
+    const { sendGapMs, sendGapMaxMs } = cfg0;
     const mode = currentMode();
+    // 人类节律（默认开）：每日上限 + 打字时间 + 作息曲线 + 走神停顿
+    const human = cfg0.humanRhythm !== false;
+    if (human) {
+      const budget = checkDailyBudget(accountId, cfg0.dailyMsgs);
+      if (!budget.ok) {
+        // 不换号、不硬闯：换号恰好是最像「多开小号轮换」的行为
+        throw new UpstreamError(
+          '该账号最近 24 小时已发 ' + budget.used + ' 条（人类节律上限 ' + budget.limit + ' 条/24h），已暂停发送以免触发账号级风控；可在运行设置里调高上限或关掉人类节律。',
+          { kind: 'budget', code: 'HUMAN_DAILY_BUDGET' },
+        );
+      }
+    }
     // 间隔是「区间内随机」而不是固定值：固定间隔方差≈0，统计上就是定时器特征
     const gap = gapFor(sendGapMs, mode, sendGapMaxMs);
+    let planned = gap;
+    if (human) {
+      const plan = humanGapPlan({
+        baseGapMs: gap,
+        promptChars: typedChars,
+        nightQuiet: cfg0.nightQuiet !== false,
+      });
+      planned = plan.ms;
+      if (plan.typing > 5000 || plan.quiet || plan.distraction > 0) {
+        this.log(
+          '[pace] 人类节律：等 ' + Math.round(planned / 1000) + 's（基数 ' + plan.base + 'ms + 打字 ' + plan.typing + 'ms' +
+            (plan.distraction ? ' + 走神 ' + plan.distraction + 'ms' : '') + (plan.quiet ? '；深夜时段已放大' : '') + '）',
+        );
+      }
+    }
     // 间隔按「上一次请求结束」起算：长回答（几十秒）之后不该再白等，
     // 但也不能「开始时算一次就够」—— 那样长回答等于把间隔吃掉了，密集感又回来了。
     const last = Math.max(lastSentAt.get(accountId) || 0, lastDoneAt.get(accountId) || 0);
     // 距上一次请求超过 10 分钟 = 人歇过了，连续计数清零（否则长休可能永远触发不到）
     if (last > 0 && Date.now() - last > HUMAN_BREAK_MS) this._consecutive = 0;
-    let wait = last + gap - Date.now();
+    let wait = last + planned - Date.now();
     // 一、连续跑了十几轮：插一次长休。真人不会一口气几十条，机器味也是账号级限流的诱因
     if (this._consecutive >= LONG_RUN_THRESHOLD && this._lastDoneAt > 0) {
       const rest = longRestFor();
@@ -278,6 +307,7 @@ export class DeepSeekHttp {
     const at = Date.now();
     lastSentAt.set(accountId, at);
     this._recentStarts.push(at);
+    if (human) recordHumanSend(accountId, at);
   }
 
   /** 取 PoW 挑战并求解 */
@@ -287,7 +317,7 @@ export class DeepSeekHttp {
     if (m === 'native') {
       const r = await this.native.call({
         path: '/api/v0/chat/create_pow_challenge',
-        headers: { 'content-type': 'application/json', authorization: 'Bearer ' + token, ...(cookie ? { cookie } : {}), ...fp },
+        headers: { 'content-type': 'application/json', authorization: 'Bearer ' + token, ...(cookie ? { cookie } : {}), ...fp, ...humanHeaders() },
         body: JSON.stringify({ target_path: targetPath }),
       });
       if (r.status !== 200 || r.json?.code !== 0) throw classify({ status: r.status, text: r.text }, '获取 PoW 挑战');
@@ -295,7 +325,7 @@ export class DeepSeekHttp {
       if (!challenge) throw new UpstreamError('PoW 挑战为空：' + String(r.text).slice(0, 200), { kind: 'upstream' });
       return solvePowHeader(challenge, targetPath);
     }
-    const res = await post('/api/v0/chat/create_pow_challenge', { target_path: targetPath }, { token, headers: { ...(cookie ? { cookie } : {}), ...fp } });
+    const res = await post('/api/v0/chat/create_pow_challenge', { target_path: targetPath }, { token, headers: { ...(cookie ? { cookie } : {}), ...fp, ...humanHeaders() } });
     if (res.status !== 200 || res.json?.code !== 0) throw classify(res, '获取 PoW 挑战');
     const challenge = res.json?.data?.biz_data?.challenge;
     if (!challenge) throw new UpstreamError('PoW 挑战为空：' + res.text.slice(0, 200), { kind: 'upstream' });
@@ -307,7 +337,7 @@ export class DeepSeekHttp {
     if (m === 'native') {
       const r = await this.native.call({
         path: '/api/v0/chat_session/create',
-        headers: { 'content-type': 'application/json', authorization: 'Bearer ' + token, ...(cookie ? { cookie } : {}), ...fp },
+        headers: { 'content-type': 'application/json', authorization: 'Bearer ' + token, ...(cookie ? { cookie } : {}), ...fp, ...humanHeaders() },
         body: '{}',
       });
       let j = null;
@@ -329,7 +359,7 @@ export class DeepSeekHttp {
       if (!id) throw classify({ status: r.status, text: r.text }, '创建会话');
       return id;
     }
-    const res = await post('/api/v0/chat_session/create', {}, { token, headers: { ...(cookie ? { cookie } : {}), ...fp } });
+    const res = await post('/api/v0/chat_session/create', {}, { token, headers: { ...(cookie ? { cookie } : {}), ...fp, ...humanHeaders() } });
     if (res.status !== 200 || res.json?.code !== 0) throw classify(res, '创建会话');
     const id = res.json?.data?.biz_data?.chat_session?.id;
     if (!id) throw new UpstreamError('创建会话返回为空：' + res.text.slice(0, 200), { kind: 'upstream' });
@@ -340,7 +370,7 @@ export class DeepSeekHttp {
    * 一次完整对话：选号 → PoW → 建会话（可选）→ SSE 流式读取
    * @returns {Promise<{sessionId: string, accountId: string}>}
    */
-  async chat({ prompt, thinking = false, sessionId = null, parentId = null, onDelta, idleMs = 180000, preferAccount = null }) {
+  async chat({ prompt, thinking = false, sessionId = null, parentId = null, onDelta, idleMs = 180000, preferAccount = null, typedChars = 0 }) {
     const cfg = loadConfig();
     const tried = new Set();
     let lastError = null;
@@ -357,7 +387,7 @@ export class DeepSeekHttp {
       const token = getToken(account.id);
       if (!token) continue;
       try {
-        await this.pace(account.id);
+        await this.pace(account.id, typedChars);
         const out = await this._runChat(account.id, () =>
           this._chatOnce({ token, cookie: getCookie(account.id), prompt, thinking, sessionId, parentId, onDelta, idleMs, accountId: account.id }),
         );
@@ -437,6 +467,11 @@ export class DeepSeekHttp {
           this.log(`[chat] 账号 ${account.label} ${error.kind === 'banned' ? '已被停用' : '被禁言'}：${when}，切换下一个`);
           continue;
         }
+        if (error.kind === 'budget') {
+          // 人类节律上限：换号 = 典型多开特征，直接停住等用户决定
+          this.log('[chat] 人类节律上限：' + String(error.message || ''));
+          throw error;
+        }
         // 其它错误：交给网关的上层重试策略（空回复重试、换会话重试）
         throw error;
       }
@@ -506,7 +541,7 @@ export class DeepSeekHttp {
     try {
       res = await this.native.request({
         path: targetPath,
-        headers: { ...baseHeaders(token), ...(cookie ? { cookie } : {}), ...fp, 'x-ds-pow-response': pow },
+        headers: { ...baseHeaders(token), ...(cookie ? { cookie } : {}), ...fp, ...humanHeaders(), 'x-ds-pow-response': pow },
         body,
         timeout: Math.max(60, Math.ceil(idleMs / 1000) + 30),
       });
@@ -613,7 +648,7 @@ export class DeepSeekHttp {
     try {
       const res = await fetch(BASE + targetPath, {
         method: 'POST',
-        headers: { ...baseHeaders(token), ...(cookie ? { cookie } : {}), ...fp, 'x-ds-pow-response': pow },
+        headers: { ...baseHeaders(token), ...(cookie ? { cookie } : {}), ...fp, ...humanHeaders(), 'x-ds-pow-response': pow },
         body: JSON.stringify({
           chat_session_id: sid,
           parent_message_id: parentId || null,

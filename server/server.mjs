@@ -924,6 +924,15 @@ async function handleChat(req, res) {
       out = await withTimeout(
         browser.chat({
           prompt,
+          // 只把「最后一条用户消息」的字数算进打字时间：整段 prompt 是完整历史，
+          // 真人每轮只输入最后那句话，按历史长度算会慢到不真实。
+          typedChars: (() => {
+            for (let i = messages.length - 1; i >= 0; i--) {
+              const m = messages[i];
+              if (m && m.role === 'user') return String(m.content || '').length;
+            }
+            return Math.min(400, String(prompt || '').length);
+          })(),
           thinking: model.thinking,
           sessionId: useSession,
           parentId: useParent,

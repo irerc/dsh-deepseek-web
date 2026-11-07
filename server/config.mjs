@@ -58,6 +58,12 @@ export const DEFAULTS = {
   // 参考实现默认「30 分钟最多 20 次」—— 实测被吊销那晚是 22:31→22:53 共 49 次、间隔 8~12 秒。
   rateWindowMs: 30 * 60 * 1000,
   rateMaxInWindow: 20,
+  // 人类节律（默认开）：间隔按「这次要打多少字」加打字时间、按本地作息放大深夜间隔、
+  // 小概率插入走神停顿，并对每个账号做 24 小时滑动的每日上限。
+  // 风控的主判据本来就是频率/体量/作息这些统计特征 —— 比 TLS 指纹更难洗。
+  humanRhythm: process.env.DS_HUMAN_RHYTHM !== '0',
+  dailyMsgs: Math.max(0, Number(process.env.DS_DAILY_MSGS || 240)), // 每账号 24h 上限，0 = 关闭
+  nightQuiet: process.env.DS_NIGHT_QUIET !== '0', // 01:00~06:30 放大间隔（真人要睡觉）
   // 失效 / 被限流时自动换号。**默认关**（参考实现：几分钟内换号继续发是极强的机器行为特征，
   // 多号交替活跃反而更容易被判定成「多开小号」）。想恢复旧行为去「高级选项（高危）」里打开。
   autoSwitch: false,
@@ -159,6 +165,9 @@ export function saveConfig(patch) {
   if (clean.sendGapMaxMs < clean.sendGapMs) clean.sendGapMaxMs = clean.sendGapMs;
   clean.rateWindowMs = Math.max(60000, Math.min(12 * 3600 * 1000, Number(clean.rateWindowMs) || DEFAULTS.rateWindowMs));
   clean.rateMaxInWindow = Math.max(0, Math.min(600, Number(clean.rateMaxInWindow) || 0));
+  clean.humanRhythm = clean.humanRhythm !== false;
+  clean.dailyMsgs = Math.max(0, Math.min(5000, Number(clean.dailyMsgs) || 0));
+  clean.nightQuiet = clean.nightQuiet !== false;
   clean.requestMode = ['raw', 'safe'].includes(clean.requestMode) ? clean.requestMode : 'raw';
   clean.transport = ['auto', 'browser', 'native', 'node'].includes(clean.transport) ? clean.transport : 'auto';
   clean.browserPath = String(clean.browserPath || '').trim().slice(0, 300);

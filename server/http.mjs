@@ -35,6 +35,25 @@ export function baseHeaders(token) {
   return headers;
 }
 
+/**
+ * Chrome 在页内发 fetch 时会带的一组「浏览器才有」的头。
+ * 不是玄学：缺 sec-fetch-* / sec-ch-ua 的 XHR 在服务端日志里一眼就能区别出来。
+ * 只用在不走真实浏览器的两条路上（native / node）——浏览器档由 Chrome 自己生成。
+ * 版本号与 UA、impersonate 保持一致（Chrome 131 / Android）。
+ */
+export function humanHeaders() {
+  return {
+    accept: '*/*',
+    'sec-ch-ua': '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+    'sec-ch-ua-mobile': '?1',
+    'sec-ch-ua-platform': '"Android"',
+    'sec-fetch-site': 'same-origin',
+    'sec-fetch-mode': 'cors',
+    'sec-fetch-dest': 'empty',
+    'accept-language': 'zh-CN,zh;q=0.9',
+  };
+}
+
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
