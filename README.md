@@ -35,7 +35,7 @@ git+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web.git
 **② 发行版压缩包（镜像，最快）**
 
 ```
-https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.57/dsh-deepseek-web-1.0.57.tgz
+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.58/dsh-deepseek-web-1.0.58.tgz
 ```
 
 **③ 仓库页（镜像浏览）**
@@ -47,7 +47,7 @@ https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web
 > 镜像不可用时，把上面链接里的 `https://gh-proxy.com/` 去掉即可直连 GitHub（官方速度可能较慢）：
 >
 > - 插件 spec：`https://github.com/irerc/dsh-deepseek-web`
-> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.57/dsh-deepseek-web-1.0.57.tgz`
+> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.58/dsh-deepseek-web-1.0.58.tgz`
 
 **不需要任何 API key**：插件自带 provider 配置与本地网关（`127.0.0.1:18081`），装好即用。
 
@@ -125,9 +125,20 @@ dsh-deepseek-web doctor
 
 | 模式 | 请求由谁发出 | PoW 在哪解 | 需要什么 |
 |---|---|---|---|
-| `auto`（默认，v1.0.57 起） | **优先**本机 Chrome / Edge 的真实页面（CDP 驱动，页面真的登录着） | 页面里用官方 wasm | 有能跑的浏览器；没有就回退 Node，并在设置页亮红字 |
-| `browser`（强制） | 同上，但**起不来就报错**，绝不静默降级 | 同上 | 必须真的有能跑的浏览器 |
+| `auto`（默认） | **browser → native → node** 依次尝试，选到第一个可用的 | 对应层 | 见下 |
+| `browser`（强制） | 本机 Chrome / Edge 的真实页面（CDP，页面真的登录着） | 页面里用官方 wasm | 能跑的浏览器；起不来就报错，绝不静默降级 |
+| `native`（本地伪装，v1.0.58 新增） | **curl_cffi**（BoringSSL impersonate `chrome131`）：TLS/JA4、HTTP/2 帧都同 Chrome，纯 CPU | 官方 wasm 本地算（payload 与服务端期望一致） | python3；缺依赖时自动装 `curl_cffi` 到状态目录（不动系统 Python） |
 | `node`（高级选项，高危） | Node 直连（旧实现） | Node 里 `WebAssembly.instantiate` | 无 |
+
+**为什么要 native 这一层**：「所有手机」这个前提判了 Chromium 的死刑 —— 手机容器里它起不来（本机实测 `SIGTRAP`）。而浏览器指纹并不需要浏览器，只需要一条配置正确的 TLS 连接：
+
+| 客户端 | JA4 | HTTP/2 (Akamai) | 结论 |
+|---|---|---|---|
+| Node fetch（`node` 档） | `t13d5212h1_b262b3658495_8e6e362c5eac` | 无（**HTTP/1.1**） | 一眼脚本 |
+| **curl_cffi `chrome131`（`native` 档）** | **`t13d1516h2_8daaf6152771_02713d6af862`** | `52d84b11737d980aef856699f885ca86`（Chrome） | 与浏览器一致 |
+| Chrome（参考实现实测表格） | `t13d1516h2_…` | 同 Chrome | 目标基线 |
+
+依赖是**按需自动装**的：先看系统 Python 有没有 `curl_cffi`；没有就 `pip install --target <状态目录>/native-libs`；连 pip 都没有就自建 venv 跑 `get-pip.py` 再装（Ubuntu 精简 rootfs 也能装成）。装不上时 `auto` 会继续回退 Node 并亮红字，并把原因写清楚。想手填解释器路径用 `nativePython`（等价 `DSW_PYTHON`），想走国内镜像用 `DSW_PIP_INDEX`。
 
 - **v1.0.57 的检测不再只看「文件在不在」**：候选范围覆盖 `PATH`、`/opt/google/chrome`、`/usr/lib/chromium*`、snap、flatpak，以及 **Playwright（`~/.cache/ms-playwright`）/ Puppeteer（`~/.cache/puppeteer`）缓存**（很多机器的 `/usr/bin/chromium` 只是软链到这些缓存）。设置页会显示**找到的路径 + 版本 + 能不能启动**，还能手填浏览器路径（`browserPath`，等价 `DSW_BROWSER_PATH`）。
 - 检测分两级：① 冒烟启动（`--dump-dom about:blank`）；② 真的起 BrowserTransport 连 CDP 开页面。**起不来必须报真实原因**（信号 / 退出码 / 最后几行日志），不能只说一句「检测不到」。
@@ -292,6 +303,29 @@ bin/cli.mjs           login/accounts/start/stop/status/doctor
 MIT License
 
 ## 更新日志
+
+### v1.0.58
+
+「如何在所有手机上实现」的答案：**不依赖浏览器，也能拿到浏览器级指纹**。
+
+**1. 新增 native 传输层（本地伪装）**
+- `server/fingerprint-sidecar.py`（约 150 行）：常驻本地代理，用 **curl_cffi**（BoringSSL impersonate `chrome131`）发请求，SSE 原样 chunked 直通、不缓冲；只接受 `GET /__ping`、`GET /__ja4`、`POST /__fetch`，且 `__fetch` 只放行 `/api/*`，不会变成开放代理。
+- `server/native-transport.mjs`（约 250 行）：找解释器 → 探测 `curl_cffi` → 缺依赖就自动装（`pip --target <状态目录>/native-libs`，没有 pip 就自建 venv + `get-pip.py`）→ 拉起 sidecar → 提供 `request/call`。
+- 实测指纹（就在这台手机上）：`JA4 = t13d1516h2_8daaf6152771_02713d6af862`、HTTP/2 Akamai `52d84b11737d980aef856699f885ca86`、`http_version = h2` —— 和 Chrome 一致；Node 直连是 `t13d5212h1_…` + HTTP/1.1。
+- 为什么这条路能覆盖**所有** DSH 客户端：它只需要 CPU 和 Python，不需要显示器、`/dev/shm`、可执行浏览器 —— 也不碰之前把 Chromium 搞崩的那些系统限制。
+
+**2. 传输层选路变成三级链（默认 `auto`）**
+- `auto = browser → native → node`：桌面端有能跑的 Chrome 仍走 CDP（最真实）；手机/容器里浏览器起不来就落到 native；native 也装不上才 Node，并亮红字说明风险。
+- 设置页传输层多一档「本地伪装（手机首选）」，另有「检测本地伪装」按钮：真起一次 sidecar，把 **JA4 / H2 指纹 / 耗时**打在界面上。
+- 新增 `nativePython`（解释器路径）与 `DSW_PIP_INDEX`（pip 镜像）两个口子。
+
+**3. 引擎改动**
+- 对话流解析抽成 `_readChatStream()`，`node` / `native` 两条路共用（限流 40029、禁言 50006/40012 判定不分叉）。
+- `powHeader` / `createSession` 增加 `native` 分支，PoW 挑战也走同一条指纹通道。
+
+**验证**：新增 `native-test.mjs`（11 组：配置三档 / 依赖探测与安装指引 / sidecar 起停 / 路径白名单 400 / SSE 状态码+content-type+分块完整 / **真 JA4 = Chrome** / 残块保留 / 限流 40029 / 禁言 50006 / 显式 native 不探测 / auto 顺序），配合更新后的 `transport-test.mjs`，全套 41 个用例通过。本机从「裸 python3 无 pip」实测自动装成功（venv + get-pip + `--target`，42MB 落在状态目录）。
+
+**边界**：native 只解决「网络栈像不像浏览器」。频率、体量、行为模式仍然是风控主判据，这套改动不构成「不会被封」的保证。
 
 ### v1.0.57
 

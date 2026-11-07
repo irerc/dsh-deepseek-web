@@ -33,6 +33,8 @@ export const DEFAULTS = {
   transport: 'auto',
   // 自定义浏览器可执行文件路径（自动探测找不到、或想指定某个版本时填）。空 = 自动探测。
   browserPath: '',
+  // native 传输用的 Python 解释器路径（空 = 自动找 python3；依赖装在 <STATE>/native-libs，不动系统 Python）
+  nativePython: '',
   maxConcurrency: 4, // 全局并发上限
   // 同一账号并发：强制 1。参考实现实测「双窗口并发 6 分钟内被限流 1 天」——
   // 这是所有封号原因里最硬的一条，不给用户调大的口子。
@@ -158,8 +160,9 @@ export function saveConfig(patch) {
   clean.rateWindowMs = Math.max(60000, Math.min(12 * 3600 * 1000, Number(clean.rateWindowMs) || DEFAULTS.rateWindowMs));
   clean.rateMaxInWindow = Math.max(0, Math.min(600, Number(clean.rateMaxInWindow) || 0));
   clean.requestMode = ['raw', 'safe'].includes(clean.requestMode) ? clean.requestMode : 'raw';
-  clean.transport = ['auto', 'browser', 'node'].includes(clean.transport) ? clean.transport : 'auto';
+  clean.transport = ['auto', 'browser', 'native', 'node'].includes(clean.transport) ? clean.transport : 'auto';
   clean.browserPath = String(clean.browserPath || '').trim().slice(0, 300);
+  clean.nativePython = String(clean.nativePython || '').trim().slice(0, 300);
   clean.idleStopMs = Math.max(60000, Math.min(24 * 3600 * 1000, Number(clean.idleStopMs) || DEFAULTS.idleStopMs));
   clean.maxConcurrency = Math.max(1, Math.min(16, Number(clean.maxConcurrency) || DEFAULTS.maxConcurrency));
   clean.perAccountConcurrency = 1;

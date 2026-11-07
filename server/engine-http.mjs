@@ -7,6 +7,7 @@ import { pickAccount, markUsed, markCooldown, setCooldown, markAuthExpired, mark
 import { reloginAccount } from './relogin.mjs';
 import { createStreamParser } from './stream-parser.mjs';
 import { BrowserTransport, browserAvailability } from './browser-transport.mjs';
+import { NativeTransport, nativeAvailability } from './native-transport.mjs';
 import { deviceId } from './device.mjs';
 import { probeToken } from './token-check.mjs';
 
@@ -20,10 +21,10 @@ import { probeToken } from './token-check.mjs';
  */
 export function configuredTransport() {
   const env = String(process.env.DS_NETWORK_TRANSPORT || '').toLowerCase();
-  if (env === 'node' || env === 'browser' || env === 'auto') return env;
+  if (['node', 'browser', 'native', 'auto'].includes(env)) return env;
   try {
     const v = loadConfig().transport;
-    return ['node', 'browser', 'auto'].includes(v) ? v : 'auto';
+    return ['node', 'browser', 'native', 'auto'].includes(v) ? v : 'auto';
   } catch {
     return 'auto';
   }
@@ -35,24 +36,34 @@ let _lastWarnAt = 0;
 /** 同步读：auto 还没判定过时先按 browser（第一次请求会 await resolveTransport 再定） */
 export function transportMode() {
   const c = configuredTransport();
-  if (c === 'node' || c === 'browser') return c;
-  return _resolved === 'node' ? 'node' : 'browser';
+  if (c !== 'auto') return c;
+  return _resolved || 'browser';
 }
 
-/** 真正决定这次请求走哪条路：auto 会先做一次浏览器冒烟检测（结果有 5 分钟缓存） */
+/**
+ * 真正决定这次请求走哪条路：
+ *   auto = browser（桌面端最真）→ native（浏览器起不来时的通用解：curl_cffi 浏览器级 TLS）→ node（兜底）
+ * 三次探测结果都有 5 分钟缓存，不会每条消息都去起一遍。
+ */
 export async function resolveTransport() {
   const c = configuredTransport();
-  if (c === 'node' || c === 'browser') {
+  if (c !== 'auto') {
     _resolved = c;
     return c;
   }
-  const avail = await browserAvailability();
-  _resolved = avail.ok ? 'browser' : 'node';
-  if (!avail.ok && Date.now() - _lastWarnAt > 60000) {
+  const browser = await browserAvailability();
+  if (browser.ok) {
+    _resolved = 'browser';
+    return _resolved;
+  }
+  const native = await nativeAvailability();
+  _resolved = native.ok ? 'native' : 'node';
+  if (Date.now() - _lastWarnAt > 60000) {
     _lastWarnAt = Date.now();
     console.warn(
-      '[transport] auto 已回退 Node 直连：' + (avail.reason || '浏览器不可用') +
-        (avail.path ? '（' + avail.path + '）' : ''),
+      '[transport] auto 选路：浏览器不可用（' + (browser.reason || '未知') + '）→ ' +
+        (_resolved === 'native' ? 'native 本地伪装（curl_cffi，JA4 = Chrome）' : '回退 Node 直连（TLS 指纹可被识破，风险更高）') +
+        (native.ok ? '' : '（native 也不可用：' + (native.reason || '') + '）'),
     );
   }
   return _resolved;
@@ -114,6 +125,7 @@ export class DeepSeekHttp {
     this._consecutive = 0;
     this._lastDoneAt = 0;
     this.browser = new BrowserTransport(log);
+    this.native = new NativeTransport(log);
   }
 
   get pending() {
@@ -162,27 +174,33 @@ export class DeepSeekHttp {
   async close() {
     this.closed = true;
     try { this.browser.close(); } catch {}
+    try { this.native.close(); } catch {}
   }
 
   /** 传输层自检：能不能用（设置页会显示结果，不静默降级） */
   async transportStatus() {
     const configured = configuredTransport();
-    const avail = await browserAvailability();
-    const mode = configured === 'node' ? 'node' : configured === 'browser' ? 'browser' : avail.ok ? 'browser' : 'node';
+    const browser = await browserAvailability();
+    const native = await nativeAvailability({ autoInstall: false });
+    let mode = configured;
+    if (configured === 'auto') mode = browser.ok ? 'browser' : native.ok ? 'native' : 'node';
     return {
       configured,
       mode,
-      ok: mode === 'node' ? true : avail.ok,
-      browser: avail.path || '',
-      version: avail.version || '',
-      reason: avail.reason || '',
-      fallback: configured === 'auto' && !avail.ok,
+      ok: mode === 'node' ? true : mode === 'native' ? native.ok : browser.ok,
+      browser: browser.path || '',
+      version: browser.version || '',
+      reason: mode === 'browser' ? browser.reason || '' : mode === 'native' ? '' : configured === 'auto' ? browser.reason || '' : '',
+      native: { ok: native.ok, python: native.python || '', version: native.version || '', reason: native.reason || '' },
+      fallback: configured === 'auto' && mode !== 'browser',
       note:
-        mode === 'node'
-          ? configured === 'auto'
-            ? 'Node 直连（auto 回退：浏览器起不来，TLS 指纹可被识破，风险更高）'
-            : 'Node 直连（高级选项，TLS 指纹可被识破）'
-          : '浏览器传输（请求与 PoW 都在真实页面里）',
+        mode === 'browser'
+          ? '浏览器传输（请求与 PoW 都在真实页面里）'
+          : mode === 'native'
+            ? '本地伪装传输（curl_cffi，TLS/JA4 = Chrome，HTTP/2 同浏览器）'
+            : configured === 'auto'
+              ? 'Node 直连（auto 兜底：浏览器与本地伪装都不可用，TLS 指纹可被识破，风险更高）'
+              : 'Node 直连（高级选项，TLS 指纹可被识破）',
     };
   }
 
@@ -263,8 +281,20 @@ export class DeepSeekHttp {
   }
 
   /** 取 PoW 挑战并求解 */
-  async powHeader(token, targetPath, cookie = '', fp = {}) {
-    if (transportMode() === 'browser') return this.browser.powHeader(token, cookie, targetPath);
+  async powHeader(token, targetPath, cookie = '', fp = {}, mode = '') {
+    const m = mode || transportMode();
+    if (m === 'browser') return this.browser.powHeader(token, cookie, targetPath);
+    if (m === 'native') {
+      const r = await this.native.call({
+        path: '/api/v0/chat/create_pow_challenge',
+        headers: { 'content-type': 'application/json', authorization: 'Bearer ' + token, ...(cookie ? { cookie } : {}), ...fp },
+        body: JSON.stringify({ target_path: targetPath }),
+      });
+      if (r.status !== 200 || r.json?.code !== 0) throw classify({ status: r.status, text: r.text }, '获取 PoW 挑战');
+      const challenge = r.json?.data?.biz_data?.challenge;
+      if (!challenge) throw new UpstreamError('PoW 挑战为空：' + String(r.text).slice(0, 200), { kind: 'upstream' });
+      return solvePowHeader(challenge, targetPath);
+    }
     const res = await post('/api/v0/chat/create_pow_challenge', { target_path: targetPath }, { token, headers: { ...(cookie ? { cookie } : {}), ...fp } });
     if (res.status !== 200 || res.json?.code !== 0) throw classify(res, '获取 PoW 挑战');
     const challenge = res.json?.data?.biz_data?.challenge;
@@ -272,8 +302,21 @@ export class DeepSeekHttp {
     return solvePowHeader(challenge, targetPath);
   }
 
-  async createSession(token, cookie = '', fp = {}) {
-    if (transportMode() === 'browser') {
+  async createSession(token, cookie = '', fp = {}, mode = '') {
+    const m = mode || transportMode();
+    if (m === 'native') {
+      const r = await this.native.call({
+        path: '/api/v0/chat_session/create',
+        headers: { 'content-type': 'application/json', authorization: 'Bearer ' + token, ...(cookie ? { cookie } : {}), ...fp },
+        body: '{}',
+      });
+      let j = null;
+      try { j = JSON.parse(r.text); } catch {}
+      const id = j?.data?.biz_data?.chat_session?.id;
+      if (r.status !== 200 || j?.code !== 0 || !id) throw classify({ status: r.status, text: r.text }, '创建会话');
+      return id;
+    }
+    if (m === 'browser') {
       const r = await this.browser.request({
         path: '/api/v0/chat_session/create',
         method: 'POST',
@@ -405,8 +448,77 @@ export class DeepSeekHttp {
   }
 
   async _chatOnce(args) {
-    if ((await resolveTransport()) === 'browser') return this._chatOnceBrowser(args);
+    const mode = await resolveTransport();
+    if (mode === 'browser') return this._chatOnceBrowser(args);
+    if (mode === 'native') return this._chatOnceNative(args);
     return this._chatOnceNode(args);
+  }
+
+  /** 会话流解析：node / native 两条路共用（SSE 按空行切块，认限流与禁言） */
+  async _readChatStream(res, onDelta, touch = () => {}) {
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      touch();
+      buf += dec.decode(value, { stream: true });
+      let idx;
+      while ((idx = buf.indexOf('\n\n')) >= 0) {
+        const block = buf.slice(0, idx);
+        buf = buf.slice(idx + 2);
+        if (rateLimitErrorFrom(block)) {
+          throw new UpstreamError('账号被站点限流：' + String(block).slice(0, 160), { kind: 'rate', code: '40029' });
+        }
+        const muted = muteErrorFrom(block);
+        if (muted) {
+          throw new UpstreamError(muted.banned ? '账号已被站点停用' : '账号被站点禁言', {
+            kind: muted.banned ? 'banned' : 'mute',
+            code: muted.banned ? '40012' : '50006',
+            untilMs: muted.untilMs,
+          });
+        }
+        if (block.trim() && onDelta) onDelta(block);
+      }
+    }
+    if (buf.trim() && onDelta) onDelta(buf);
+  }
+
+  /** native 传输：请求由 curl_cffi（Chrome 级 TLS/H2）发出，PoW 仍用官方 wasm 本地算 */
+  async _chatOnceNative({ token, cookie = '', prompt, thinking, sessionId, parentId, onDelta, idleMs, accountId = '' }) {
+    const targetPath = '/api/v0/chat/completion';
+    const fp = accountId ? getFingerprint(accountId) : {};
+    const pow = await this.powHeader(token, targetPath, cookie, fp, 'native');
+    const sid = sessionId || (await this.createSession(token, cookie, fp, 'native'));
+    const body = JSON.stringify({
+      chat_session_id: sid,
+      parent_message_id: parentId || null,
+      model_type: 'default',
+      prompt,
+      ref_file_ids: [],
+      thinking_enabled: !!thinking,
+      search_enabled: false,
+      action: null,
+      preempt: false,
+    });
+    let res;
+    try {
+      res = await this.native.request({
+        path: targetPath,
+        headers: { ...baseHeaders(token), ...(cookie ? { cookie } : {}), ...fp, 'x-ds-pow-response': pow },
+        body,
+        timeout: Math.max(60, Math.ceil(idleMs / 1000) + 30),
+      });
+    } catch (e) {
+      throw new UpstreamError('本地伪装传输失败：' + String(e.message || e), { kind: 'upstream', code: 'NATIVE_FAILED' });
+    }
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      throw classify({ status: res.status, text }, '对话请求');
+    }
+    await this._readChatStream(res, onDelta);
+    return { sessionId: sid };
   }
 
   /** 浏览器传输：请求由真实页面发出（TLS 指纹 = 浏览器），PoW 在页面里解 */
@@ -519,33 +631,7 @@ export class DeepSeekHttp {
         const text = await res.text().catch(() => '');
         throw classify({ status: res.status, text }, '对话请求');
       }
-      const reader = res.body.getReader();
-      const dec = new TextDecoder();
-      let buf = '';
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        last = Date.now();
-        buf += dec.decode(value, { stream: true });
-        let idx;
-        while ((idx = buf.indexOf('\n\n')) >= 0) {
-          const block = buf.slice(0, idx);
-          buf = buf.slice(idx + 2);
-          if (rateLimitErrorFrom(block)) {
-            throw new UpstreamError('账号被站点限流：' + String(block).slice(0, 160), { kind: 'rate', code: '40029' });
-          }
-          const muted = muteErrorFrom(block);
-          if (muted) {
-            throw new UpstreamError(muted.banned ? '账号已被站点停用' : '账号被站点禁言', {
-              kind: muted.banned ? 'banned' : 'mute',
-              code: muted.banned ? '40012' : '50006',
-              untilMs: muted.untilMs,
-            });
-          }
-          if (block.trim() && onDelta) onDelta(block);
-        }
-      }
-      if (buf.trim() && onDelta) onDelta(buf);
+      await this._readChatStream(res, onDelta, () => { last = Date.now(); });
       return { sessionId: sid };
     } finally {
       clearInterval(watchdog);
