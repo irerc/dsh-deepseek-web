@@ -35,7 +35,7 @@ git+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web.git
 **② 发行版压缩包（镜像，最快）**
 
 ```
-https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.55/dsh-deepseek-web-1.0.55.tgz
+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.56/dsh-deepseek-web-1.0.56.tgz
 ```
 
 **③ 仓库页（镜像浏览）**
@@ -47,7 +47,7 @@ https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web
 > 镜像不可用时，把上面链接里的 `https://gh-proxy.com/` 去掉即可直连 GitHub（官方速度可能较慢）：
 >
 > - 插件 spec：`https://github.com/irerc/dsh-deepseek-web`
-> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.55/dsh-deepseek-web-1.0.55.tgz`
+> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.56/dsh-deepseek-web-1.0.56.tgz`
 
 **不需要任何 API key**：插件自带 provider 配置与本地网关（`127.0.0.1:18081`），装好即用。
 
@@ -92,6 +92,7 @@ dsh-deepseek-web doctor
 - 429 → 该账号冷却 60s 起指数退避（上限 10min）并切下一个账号。
 - 401 → 若该账号保存了密码，先自动重新登录并把新 token 换到原账号（同一账号原地续跑，不打断对话）；没存密码或重登失败才标记「登录失效」。
 - 指定账号：模型名写 `deepseek-chat@工作号` 即可固定到某个账号。
+- **默认不自动换号**：某个号失效/被限流时直接报错停下（旧的自动轮换在「高级选项（高危）」里，默认关）。
 
 ## 多设备与设备身份（为什么会被踢下线）
 
@@ -110,6 +111,30 @@ dsh-deepseek-web doctor
 **升级后第一次**：`device.json` 里的旧 hex 会被迁移成 UUID，站点可能把这次当成「新设备登录」要求一次邮箱验证码 —— 在内嵌/浏览器登录页里输一次即可，之后设备就固定下来了。如果账号安全里的设备列表很乱，去 `chat.deepseek.com` → 设置 → 账号安全 → 登录设备，把不认识/旧的设备删掉。
 
 **还想更稳的话**：手机和插件用**不同账号**（插件本来就支持多账号池），这样两边互不干扰；同一账号不要同时开着网页版和插件长时间跑。
+
+## 传输层：默认走真实浏览器（Node 直连是高级选项）
+
+网页端判断「这是不是脚本」不只看频率，也看**网络栈**。Node 的 undici 在 TLS 层就露馅：
+
+| | JA4 | cipher 列表哈希 | ALPN |
+|---|---|---|---|
+| Node fetch（undici） | `t13d5212h1_…` | — | **h1** |
+| Chrome / Edge | `t13d1516h2_…` | 一致 | h2 |
+
+这几项**调参修不了**（参考实现的实测表格也是这个结论）。所以 v1.0.56 起默认把对话请求交给**本机真实浏览器**：
+
+| 模式 | 请求由谁发出 | PoW 在哪解 | 需要什么 |
+|---|---|---|---|
+| `browser`（默认） | 本机 Chrome / Edge 的真实页面（CDP 驱动，页面真的登录着） | **页面上下文里用官方 wasm** | 本机有 Chrome / Edge / Chromium |
+| `node`（高级选项，高危） | Node 直连（旧实现） | Node 里 `WebAssembly.instantiate` | 无 |
+
+- **找不到浏览器就明确报错**，不会静默退回 Node（那样等于这个改动没发生）。设置页「运行 → 传输层」有 **测试浏览器传输** 按钮，会真的起一次浏览器再收尸，把结果直接打出来。
+- 换号/换 token 时会把登录态重装进页面（cookie + `localStorage.userToken`），否则会出现「页面是登录页、请求却带合法 Authorization」这种真人身上不会有的组合。
+- 回滚：设置页切 `Node 直连（高危）`，或环境变量 `DS_NETWORK_TRANSPORT=node`（改完立即生效，不用降级版本）。
+- 传输层只影响**对话请求与 PoW**；列会话、体检这类只读管理请求仍走 Node。
+- 浏览器传输跑在无头模式；要过人机验证时用 `DSW_BROWSER_HEADED=1` 起可见窗口（同一个 profile，验证完把窗口关掉）。
+
+**自动换号默认关闭**（旧的「一被限流就换号」收进高级选项）：几分钟内换号继续发是极强的机器行为特征，多号交替活跃反而更容易被判成「同一人的多开小号」，处置可能波及全部关联账号。
 
 ## 防风控：连「发给 AI 的内容」一起管
 
@@ -201,6 +226,8 @@ dsh-deepseek-web doctor
 | saveLoginCredential | true | 登录成功时把登录表单里的邮箱+密码加密保存在本机（下次自动填表 / token 失效自动重登）；关掉则不保存 |
 | autoRelogin | true | token 失效时用保存的账号密码自动重新登录 |
 | requestMode | raw | 请求模式：`raw` 原始（提示词原样）/ `safe` 保险（插使用规范 + 更慢更保守） |
+| transport | browser | 传输层：`browser` 真实浏览器页面发请求（TLS 指纹 = 浏览器，PoW 在页面里解）/ `node` 直连（高级选项，高危） |
+| autoSwitch | false | 账号失效/被限流时是否自动换下一个号（**默认关**；开了就是旧行为，机器特征明显） |
 | sectionOrder | usage,ledger,engine,accounts,addAccount,sessions,diagnostics | 设置页卡片顺序，由最下方「页面设置」的 ↑/↓ 调整 |
 
 设置页的卡片分进四个页签（账号 / 登录 / 用量 / 运行），每页内从上到下默认是：**账号** 账号管理 → 添加账号；**登录** 登录会话 → 登录状态；**用量** 网页版用量 → 调用台账；**运行** 运行设置 → 页面设置 → 维护，另有引擎日志卡。（没有账号时「添加账号」临时置顶，默认页也是账号页。）
@@ -262,6 +289,25 @@ bin/cli.mjs           login/accounts/start/stop/status/doctor
 MIT License
 
 ## 更新日志
+
+### v1.0.56
+
+把参考实现里**最硬的两条**落地了（用户确认：默认用新的，旧实现全部收进「高级选项」并加高危提示）。这两条都属于破坏性变更，所以每条都有独立回滚开关。
+
+**1. 传输层：默认走真实浏览器（TLS/JA4 指纹 = 浏览器）**
+- 默认 `transport: browser`：对话请求由本机 Chrome / Edge 的**真实页面**发出（CDP 驱动），页面是**真的登录着**的（cookie + `localStorage.userToken` 都装进去，装完 reload 让站点自己的 JS 跑起来）。
+- **PoW 改到页面上下文里解**：官方自己的 wasm 在官方自己的页面里跑 —— 公开文档把「Node 里 WebAssembly 解挑战」列为明确的封号触发条件。
+- 找不到浏览器 ⇒ **明确报错**，不静默退回 Node；设置页有「测试浏览器传输」按钮（真起一次浏览器再收尸，给可用/不可用 + 耗时）。
+- 回滚：设置页切「Node 直连（高危）」，或 `DS_NETWORK_TRANSPORT=node`（立即生效）。要过人机验证时 `DSW_BROWSER_HEADED=1` 开可见窗口。
+- 新增 `server/browser-transport.mjs`（约 400 行，零第三方依赖，用 Node 自带 WebSocket 说 CDP）。
+
+**2. 自动换号默认关闭**
+- 旧的「失效/被限流就换下一个号」收进「运行设置 → 高级选项（高危，默认关闭）」；默认直接报错停下。
+- 理由（参考实现原话）：几分钟内换号继续发是极强的机器行为特征，多号交替活跃更像「有组织的规避」，会加剧账号关联。
+
+**还没做的（仍然是破坏性）**：会话清理策略（`immediate` / `deferred` 批量删）—— 我们本来就是「按 DSH 会话复用、不删」，相当于参考实现里请求最少的 `keep` 档，所以没有改。
+
+**本机实测**：这个容器里 Chromium 起不来（`SIGTRAP`，`/proc/sys/fs/inotify/*` 被 mask），所以浏览器传输在这台机器上会**明确报错**并提示切回 Node —— 这恰好验证了「不静默降级」那条。桌面端装了 Chrome/Edge 就是默认可用。用例 `transport-test.mjs`（8 组断言：默认值 / 切换保存 / 环境变量回滚 / 找浏览器 / 不可用时错误信息必须带操作路径 / 自检接口 / 收尸）全绿；既有 31 个用例重跑通过。
 
 ### v1.0.55
 

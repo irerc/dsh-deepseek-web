@@ -6,7 +6,23 @@ import { currentMode, modeLimits, gapFor, rateWindowFor, LONG_RUN_THRESHOLD, HUM
 import { pickAccount, markUsed, markCooldown, setCooldown, markAuthExpired, markMuted, listAccounts, getToken, getCookie, getFingerprint } from './accounts.mjs';
 import { reloginAccount } from './relogin.mjs';
 import { createStreamParser } from './stream-parser.mjs';
+import { BrowserTransport } from './browser-transport.mjs';
+import { deviceId } from './device.mjs';
 import { probeToken } from './token-check.mjs';
+
+/**
+ * 传输层：browser（默认，走真实 Chromium 页面）/ node（直连，旧实现 —— 高级选项里，带高危提示）。
+ * 找浏览器由 browser-transport 负责；找不到时**明确报错**，不静默退回 node（参考实现的破坏性变更）。
+ */
+export function transportMode() {
+  const env = String(process.env.DS_NETWORK_TRANSPORT || '').toLowerCase();
+  if (env === 'node' || env === 'browser') return env;
+  try {
+    return loadConfig().transport === 'node' ? 'node' : 'browser';
+  } catch {
+    return 'browser';
+  }
+}
 
 const lastSentAt = new Map(); // accountId -> 上一次请求「开始」时间
 const lastDoneAt = new Map(); // accountId -> 上一次请求「结束」时间（间隔要按结束算，长回答之后不必白等，但必须等满）
@@ -63,6 +79,7 @@ export class DeepSeekHttp {
     this._recentStarts = [];
     this._consecutive = 0;
     this._lastDoneAt = 0;
+    this.browser = new BrowserTransport(log);
   }
 
   get pending() {
@@ -110,6 +127,16 @@ export class DeepSeekHttp {
 
   async close() {
     this.closed = true;
+    try { this.browser.close(); } catch {}
+  }
+
+  /** 传输层自检：能不能用（设置页会显示结果，不静默降级） */
+  async transportStatus() {
+    const mode = transportMode();
+    if (mode === 'node') return { mode, ok: true, browser: '', note: 'Node 直连（高级选项，TLS 指纹可被识破）' };
+    const bin = this.browser.browserPath;
+    if (!bin) return { mode, ok: false, browser: '', note: '没找到 Chrome / Edge / Chromium' };
+    return { mode, ok: true, browser: bin, note: '浏览器传输（请求与 PoW 都在真实页面里）' };
   }
 
   async screenshot() {
@@ -190,6 +217,7 @@ export class DeepSeekHttp {
 
   /** 取 PoW 挑战并求解 */
   async powHeader(token, targetPath, cookie = '', fp = {}) {
+    if (transportMode() === 'browser') return this.browser.powHeader(token, cookie, targetPath);
     const res = await post('/api/v0/chat/create_pow_challenge', { target_path: targetPath }, { token, headers: { ...(cookie ? { cookie } : {}), ...fp } });
     if (res.status !== 200 || res.json?.code !== 0) throw classify(res, '获取 PoW 挑战');
     const challenge = res.json?.data?.biz_data?.challenge;
@@ -198,6 +226,19 @@ export class DeepSeekHttp {
   }
 
   async createSession(token, cookie = '', fp = {}) {
+    if (transportMode() === 'browser') {
+      const r = await this.browser.request({
+        path: '/api/v0/chat_session/create',
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: 'Bearer ' + token, ...fp },
+        body: '{}',
+      });
+      let j = null;
+      try { j = JSON.parse(r.text); } catch {}
+      const id = j?.data?.biz_data?.chat_session?.id;
+      if (!id) throw classify({ status: r.status, text: r.text }, '创建会话');
+      return id;
+    }
     const res = await post('/api/v0/chat_session/create', {}, { token, headers: { ...(cookie ? { cookie } : {}), ...fp } });
     if (res.status !== 200 || res.json?.code !== 0) throw classify(res, '创建会话');
     const id = res.json?.data?.biz_data?.chat_session?.id;
@@ -316,7 +357,85 @@ export class DeepSeekHttp {
     });
   }
 
-  async _chatOnce({ token, cookie = '', prompt, thinking, sessionId, parentId, onDelta, idleMs, accountId = '' }) {
+  async _chatOnce(args) {
+    if (transportMode() === 'browser') return this._chatOnceBrowser(args);
+    return this._chatOnceNode(args);
+  }
+
+  /** 浏览器传输：请求由真实页面发出（TLS 指纹 = 浏览器），PoW 在页面里解 */
+  async _chatOnceBrowser({ token, cookie = '', prompt, thinking, sessionId, parentId, onDelta, idleMs, accountId = '' }) {
+    const targetPath = '/api/v0/chat/completion';
+    const fp = accountId ? getFingerprint(accountId) : {};
+    try {
+      await this.browser.installSession(token, cookie, deviceId());
+    } catch (e) {
+      throw new UpstreamError(
+        '浏览器传输不可用：' + String(e.message || e) + '（去「运行设置 → 高级选项（高危）」切回 Node 直连，或装一个 Chrome / Edge）',
+        { kind: 'upstream', code: 'BROWSER_UNAVAILABLE' },
+      );
+    }
+    let pow;
+    try {
+      pow = await this.browser.powHeader(token, cookie, targetPath);
+    } catch (e) {
+      throw new UpstreamError(
+        '浏览器传输不可用（PoW 没解出来）：' + String(e.message || e) + '（去「运行设置 → 高级选项（高危）」切回 Node 直连）',
+        { kind: 'upstream', code: 'BROWSER_POW_FAILED' },
+      );
+    }
+    const sid = sessionId || (await this.createSession(token, cookie, fp));
+    const headers = {
+      'content-type': 'application/json',
+      authorization: 'Bearer ' + token,
+      ...fp,
+      'x-ds-pow-response': pow,
+    };
+    const payload = JSON.stringify({
+      chat_session_id: sid,
+      parent_message_id: parentId || null,
+      model_type: 'default',
+      prompt,
+      ref_file_ids: [],
+      thinking_enabled: !!thinking,
+      search_enabled: false,
+      action: null,
+      preempt: false,
+    });
+    let buf = '';
+    let streamError = null;
+    const onChunk = (chunk) => {
+      if (streamError) return;
+      buf += chunk;
+      let idx;
+      while ((idx = buf.indexOf('\n\n')) >= 0) {
+        const block = buf.slice(0, idx);
+        buf = buf.slice(idx + 2);
+        try {
+          if (rateLimitErrorFrom(block)) throw new UpstreamError('账号被站点限流：' + String(block).slice(0, 160), { kind: 'rate', code: '40029' });
+          const muted = muteErrorFrom(block);
+          if (muted) {
+            throw new UpstreamError(muted.banned ? '账号已被站点停用' : '账号被站点禁言', {
+              kind: muted.banned ? 'banned' : 'mute',
+              code: muted.banned ? '40012' : '50006',
+              untilMs: muted.untilMs,
+            });
+          }
+        } catch (e) {
+          streamError = e;
+          return;
+        }
+        if (block.trim() && onDelta) onDelta(block);
+      }
+    };
+    const out = await this.browser.stream({ path: targetPath, headers, body: payload, onChunk, idleMs: idleMs || 0 });
+    if (streamError) throw streamError;
+    if (out.status !== 200) throw classify({ status: out.status, text: out.text }, '对话请求');
+    if (buf.trim() && onDelta) onDelta(buf);
+    return { sessionId: sid };
+  }
+
+  /** Node 直连（旧实现，高级选项；仍保留全部逻辑，可随时切回） */
+  async _chatOnceNode({ token, cookie = '', prompt, thinking, sessionId, parentId, onDelta, idleMs, accountId = '' }) {
     const targetPath = '/api/v0/chat/completion';
     // 登录页采集到的真实浏览器指纹头：有就带上，让请求和真人页面发出的长得一样
     const fp = accountId ? getFingerprint(accountId) : {};

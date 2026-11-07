@@ -22,6 +22,10 @@ export const DEFAULTS = {
   sendGapMaxMs: 4500,
   // 请求模式：raw 原始（提示词原样、不加额外说明）| safe 保险（提示词里插使用规范 + 更慢更保守）
   requestMode: 'raw',
+  // 传输层：browser 走真实 Chromium 页面发请求（TLS/JA4 指纹 = 浏览器，PoW 也在页面里解）
+  //         node 直连（旧实现，Node 的 TLS 指纹能被判成非浏览器；B 站/风控侧更易识别）
+  // 参考实现 0.7.0 起把浏览器列为**破坏性变更的默认**：找不到浏览器时明确报错，不静默退回 Node。
+  transport: 'browser',
   maxConcurrency: 4, // 全局并发上限
   // 同一账号并发：强制 1。参考实现实测「双窗口并发 6 分钟内被限流 1 天」——
   // 这是所有封号原因里最硬的一条，不给用户调大的口子。
@@ -45,8 +49,9 @@ export const DEFAULTS = {
   // 参考实现默认「30 分钟最多 20 次」—— 实测被吊销那晚是 22:31→22:53 共 49 次、间隔 8~12 秒。
   rateWindowMs: 30 * 60 * 1000,
   rateMaxInWindow: 20,
-  // 失效 / 被限流时自动换号。保持原来的行为（开着）；想学参考插件那样更保守可以关掉
-  autoSwitch: true,
+  // 失效 / 被限流时自动换号。**默认关**（参考实现：几分钟内换号继续发是极强的机器行为特征，
+  // 多号交替活跃反而更容易被判定成「多开小号」）。想恢复旧行为去「高级选项（高危）」里打开。
+  autoSwitch: false,
   // 定时换号间隔（分钟，0 = 关闭）
   switchIntervalMin: 0,
   defaultAccount: null, // 不指定时按账号池轮询
@@ -106,6 +111,9 @@ export function loadConfig() {
   if (process.env.DS_RATE_MAX_IN_WINDOW) cfg.rateMaxInWindow = Number(process.env.DS_RATE_MAX_IN_WINDOW);
   if (process.env.DS_MAX_CONCURRENCY) cfg.maxConcurrency = Number(process.env.DS_MAX_CONCURRENCY);
   if (process.env.DS_REQUEST_MODE) cfg.requestMode = String(process.env.DS_REQUEST_MODE);
+  if (process.env.DS_NETWORK_TRANSPORT) cfg.transport = String(process.env.DS_NETWORK_TRANSPORT);
+  if (process.env.DS_AUTO_SWITCH === '1') cfg.autoSwitch = true;
+  if (process.env.DS_AUTO_SWITCH === '0') cfg.autoSwitch = false;
   return cfg;
 }
 
@@ -132,6 +140,7 @@ export function saveConfig(patch) {
   clean.rateWindowMs = Math.max(60000, Math.min(12 * 3600 * 1000, Number(clean.rateWindowMs) || DEFAULTS.rateWindowMs));
   clean.rateMaxInWindow = Math.max(0, Math.min(600, Number(clean.rateMaxInWindow) || 0));
   clean.requestMode = ['raw', 'safe'].includes(clean.requestMode) ? clean.requestMode : 'raw';
+  clean.transport = ['browser', 'node'].includes(clean.transport) ? clean.transport : 'browser';
   clean.idleStopMs = Math.max(60000, Math.min(24 * 3600 * 1000, Number(clean.idleStopMs) || DEFAULTS.idleStopMs));
   clean.maxConcurrency = Math.max(1, Math.min(16, Number(clean.maxConcurrency) || DEFAULTS.maxConcurrency));
   clean.perAccountConcurrency = 1;
