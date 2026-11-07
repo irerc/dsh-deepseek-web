@@ -35,7 +35,7 @@ git+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web.git
 **② 发行版压缩包（镜像，最快）**
 
 ```
-https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.65/dsh-deepseek-web-1.0.65.tgz
+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.66/dsh-deepseek-web-1.0.66.tgz
 ```
 
 **③ 仓库页（镜像浏览）**
@@ -47,7 +47,7 @@ https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web
 > 镜像不可用时，把上面链接里的 `https://gh-proxy.com/` 去掉即可直连 GitHub（官方速度可能较慢）：
 >
 > - 插件 spec：`https://github.com/irerc/dsh-deepseek-web`
-> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.65/dsh-deepseek-web-1.0.65.tgz`
+> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.66/dsh-deepseek-web-1.0.66.tgz`
 
 **不需要任何 API key**：插件自带 provider 配置与本地网关（`127.0.0.1:18081`），装好即用。
 
@@ -340,6 +340,20 @@ bin/cli.mjs           login/accounts/start/stop/status/doctor
 MIT License
 
 ## 更新日志
+
+### v1.0.66
+**浏览器起不来时不再只给一段红字：三个一键走法 + 日志折叠**
+
+现象：手机上（容器里）自带 Chromium 一开页面就 `SIGTRAP`（退出码 133）。实测日志依次是 `Failed to connect to dbus` → `ANGLE … EGL initialize failed` → `Trace/breakpoint trap`，`--headless=old`、`--single-process --no-zygote`、`--use-angle=swiftshader`、`--disable-software-rasterizer`、`--mute-audio` 全部同样崩；`/dev/shm` 连 `df` 都 `Permission denied`。这是运行环境限制，不是路径/参数问题。
+
+界面改动：
+- 红字盒子压成三行：一句原因（截断）+ 一句结论 + 三个按钮；
+- 按钮分别是 `用本地伪装`（native/curl_cffi）、`用手机浏览器`（device/真机 Chrome）、`自动选`；
+- 原始 stderr 收进「为什么起不来（日志）」，需要排查时再展开。
+
+真机浏览器这条路（最不容易被判自动化）已经在本机装好前置文件：
+`/data/local/tmp/chrome-command-line` = `chrome --remote-debugging-port=9222 --remote-allow-origins=*`（644，shell 可读）。
+剩下的只能你在手机上做：Chrome 打开 `chrome://flags` → 搜 `Enable command line on non-rooted devices` → 设 Enabled → 彻底退出 Chrome（划掉全部标签和后台）→ 重开 → 访问一次 chat.deepseek.com → 回来点「检测连接」。
 
 ### v1.0.65
 **提示词改成人类对话：不再把 OpenAI 请求体 JSON 灌进聊天框**
