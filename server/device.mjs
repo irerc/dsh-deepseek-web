@@ -138,3 +138,16 @@ export function migrateAccountDevices(accountIds = []) {
   writeDevices(map);
   return { migrated, already: false };
 }
+
+/**
+ * 把某个账号的设备 id 直接设成给定值（登录页用哪个 id 登的，聊天就用哪个 id）。
+ * 只接受合法 UUID v4；不合法的忽略，返回 false。
+ */
+export function adoptDeviceIdFor(accountId, id) {
+  if (!accountId || !UUID_V4.test(String(id || '').trim())) return false;
+  const map = readDevices();
+  map[accountId] = String(id).trim();
+  writeDevices(map);
+  cachedFor.set(accountId, map[accountId]);
+  return true;
+}

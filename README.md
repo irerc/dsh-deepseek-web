@@ -35,7 +35,7 @@ git+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web.git
 **② 发行版压缩包（镜像，最快）**
 
 ```
-https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.77/dsh-deepseek-web-1.0.77.tgz
+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.78/dsh-deepseek-web-1.0.78.tgz
 ```
 
 **③ 仓库页（镜像浏览）**
@@ -47,7 +47,7 @@ https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web
 > 镜像不可用时，把上面链接里的 `https://gh-proxy.com/` 去掉即可直连 GitHub（官方速度可能较慢）：
 >
 > - 插件 spec：`https://github.com/irerc/dsh-deepseek-web`
-> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.77/dsh-deepseek-web-1.0.77.tgz`
+> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.78/dsh-deepseek-web-1.0.78.tgz`
 
 **不需要任何 API key**：插件自带 provider 配置与本地网关（`127.0.0.1:18081`），装好即用。
 
@@ -340,6 +340,21 @@ bin/cli.mjs           login/accounts/start/stop/status/doctor
 MIT License
 
 ## 更新日志
+
+### v1.0.78
+**「按新设备重置」：一条命令把这个账号在本机的身份清成全新设备**
+
+| 环节 | 以前 | 现在 |
+|---|---|---|
+| 设备 id | 换 UUID，但只换了聊天那条 | 换 UUID，**登录页与聊天用同一个 id**（登录时用哪个 id，之后聊天就用哪个） |
+| 登录会话设备 | 所有登录页共用全局 id | **每个登录会话一套 id**：换一次登录就是一台全新设备 |
+| 登录 cookie | 留着 | 删掉 `jar-*.json` / `cookie-meta.json` / `login-sessions.json`，下次登录是全新浏览器会话 |
+| 请求头指纹 | 清空 | 清空（下次登录重新采集） |
+| 热身标记 / 最近使用 / 24h 发送计数 | 清空（计数是全局的） | 清空，**只清这个账号**，别的号不受影响 |
+
+入口：账号卡片 →「更多」→**「按新设备重置」**（红色那颗，带二次确认）。
+
+站点侧清不掉的三样，插件不会假装能清：**账号历史、对话内容、出口 IP、已下发的处置记录**。想真正像新设备，网络也要换（手机流量 / 另一条宽带）。
 
 ### v1.0.77
 **登录页减负：一颗主按钮，其余折进「更多登录方式」**

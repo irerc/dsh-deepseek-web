@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url';
 
 import { loadConfig, STATE_DIR } from './config.mjs';
 import { peekTicket, dropTicket } from './autologin.mjs';
-import { deviceId } from './device.mjs';
+import { deviceId, deviceIdFor } from './device.mjs';
 import { noteSetCookies } from './cookie-meta.mjs';
 const SID_COOKIE = 'dsweb_sid';
 function jarFile(sid) {
@@ -696,7 +696,9 @@ export function startLoginProxy({ port = 18090, reportUrl }) {
             return '<script' + pre + ' data-dsweb="' + src.split('/').pop() + '" onload="window.__dsLoaded=(window.__dsLoaded||0)+1" onerror="window.__dsErr=(window.__dsErr||0)+1;window.__dsErrSrc=this.src" src="' + src + '"';
           });
           const regionLabel = (loadConfig().loginRegion === 'global' ? '海外' : loadConfig().loginRegion === 'cn' ? '国内' : '自动') + '·' + siteHost();
-          const DEVICE_ID = deviceId();
+          // 每个登录会话一套设备 id：登录页看到的设备 = 这个账号之后聊天用的设备，
+          // 换一次登录就是一台全新设备（不同会话之间不会互相牵连）。
+          const DEVICE_ID = deviceIdFor('login:' + sid);
           const snippet = INJECT
             .split('__DSW_REGION__')
             .join(regionLabel)
