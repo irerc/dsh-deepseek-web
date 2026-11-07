@@ -111,7 +111,10 @@ export function humanGapPlan({ baseGapMs = 0, promptChars = 0, nightQuiet = true
   // 作息：间隔按 1/factor 放大；深夜再额外乘一档（人要睡觉，凌晨高频是最刺眼的机器特征）
   const nightMul = quiet ? 2.6 : 1;
   const baseAdj = Math.round(base * (1 / Math.max(0.2, factor)) * nightMul);
-  const typing = typingMs(promptChars, rng);
+  // 只有「像人打出来的那点字」才计打字时间。DSH 的 prompt 动辄几万字符（上下文+工具说明），
+  // 按字算能算出十几秒的假打字——真人不会在输入框里敲 2 万字，这层反而暴露机器。
+  const typedLike = promptChars > 800 ? 0 : promptChars;
+  const typing = typingMs(typedLike, rng);
   const distraction = distractionMs(rng);
   return {
     ms: baseAdj + typing + distraction,

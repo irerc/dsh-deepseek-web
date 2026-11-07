@@ -2,6 +2,7 @@
 import { BASE, UA, post, get, classify, UpstreamError, baseHeaders, humanHeaders, setUpstreamHook } from './http.mjs';
 import { solvePowHeader } from './pow.mjs';
 import { loadConfig } from './config.mjs';
+import { tzOffsetMinutes } from './timezone.mjs';
 import { currentMode, modeLimits, gapFor, rateWindowFor, LONG_RUN_THRESHOLD, HUMAN_BREAK_MS, longRestFor, throttleBackoffMs } from './request-mode.mjs';
 import { pickAccount, markUsed, markCooldown, setCooldown, markAuthExpired, markMuted, listAccounts, getToken, getCookie, getFingerprint, updateAccount } from './accounts.mjs';
 import { humanGapPlan, checkDailyBudget, recordHumanSend } from './human-rhythm.mjs';
@@ -94,6 +95,10 @@ export async function resolveTransport() {
   }
   return _resolved;
 }
+
+// 距上一次请求超过这么久 = 人离开了会儿，回来接着说第一句不需要再等「输出间隔」。
+// 以前不管隔了多久都照 30s+ 的间隔摆着等，代价是「重启后第一条消息特别慢」——真人没这个行为。
+const FIRST_MSG_FREE_MS = 90_000;
 
 const lastSentAt = new Map(); // accountId -> 上一次请求「开始」时间
 const lastDoneAt = new Map(); // accountId -> 上一次请求「结束」时间（间隔要按结束算，长回答之后不必白等，但必须等满）
@@ -395,19 +400,18 @@ export class DeepSeekHttp {
     // 间隔是「区间内随机」而不是固定值：固定间隔方差≈0，统计上就是定时器特征
     const gap = gapFor(sendGapMs, mode, sendGapMaxMs);
     let planned = gap;
+    let planNote = '';
     if (human) {
       const plan = humanGapPlan({
         baseGapMs: gap,
         promptChars: typedChars,
         nightQuiet: cfg0.nightQuiet !== false,
+        tzOffsetMin: tzOffsetMinutes(),
       });
       planned = plan.ms;
-      if (plan.typing > 5000 || plan.quiet || plan.distraction > 0) {
-        this.log(
-          '[pace] 人类节律：等 ' + Math.round(planned / 1000) + 's（基数 ' + plan.base + 'ms + 打字 ' + plan.typing + 'ms' +
-            (plan.distraction ? ' + 走神 ' + plan.distraction + 'ms' : '') + (plan.quiet ? '；深夜时段已放大' : '') + '）',
-        );
-      }
+      planNote =
+        '（基数 ' + plan.base + 'ms + 打字 ' + plan.typing + 'ms' +
+        (plan.distraction ? ' + 走神 ' + plan.distraction + 'ms' : '') + (plan.quiet ? '；深夜时段已放大' : '') + '）';
     }
     // 间隔按「上一次请求结束」起算：长回答（几十秒）之后不该再白等，
     // 但也不能「开始时算一次就够」—— 那样长回答等于把间隔吃掉了，密集感又回来了。
@@ -415,6 +419,13 @@ export class DeepSeekHttp {
     // 距上一次请求超过 10 分钟 = 人歇过了，连续计数清零（否则长休可能永远触发不到）
     if (last > 0 && Date.now() - last > HUMAN_BREAK_MS) this._consecutive = 0;
     let wait = last + planned - Date.now();
+    // 第一次说话、或上一句已经过去一阵子：真人不会先发会儿呆再开口，直接说不等
+    if (!last || Date.now() - last > FIRST_MSG_FREE_MS) {
+      if (wait > 0) this.log('[pace] 首轮/间歇后，跳过 ' + Math.round(wait / 1000) + 's 间隔');
+      wait = 0;
+    } else if (wait > 0 && human) {
+      this.log('[pace] 人类节律：等 ' + Math.round(wait / 1000) + 's' + planNote);
+    }
     // 一、连续跑了十几轮：插一次长休。真人不会一口气几十条，机器味也是账号级限流的诱因
     if (this._consecutive >= LONG_RUN_THRESHOLD && this._lastDoneAt > 0) {
       const rest = longRestFor();
@@ -504,10 +515,9 @@ export class DeepSeekHttp {
    */
   async chat({ prompt, thinking = false, sessionId = null, parentId = null, onDelta, idleMs = 180000, preferAccount = null, typedChars = 0 }) {
     const cfg = loadConfig();
-    // 新账号第一次真正用之前，先像人一样闲聊两句（同一条出站路径、同一套节律）
-    if (cfg.warmup) {
-      try { await this._maybeWarmup(preferAccount); } catch (e) { this.log('[warmup] 跳过：' + String((e && e.message) || e).slice(0, 120)); }
-    }
+    // 新账号的「先闲聊两句」从关键路径移走：以前是 await，第一条消息要等两句闲聊 + 节律，
+    // 重启后第一条能慢到一分钟。现在改成空闲后台补，用户那句永远先发出去。
+    if (cfg.warmup) this._warmupWhenIdle(preferAccount);
     const tried = new Set();
     let lastError = null;
     let prefer = preferAccount;
@@ -622,6 +632,22 @@ export class DeepSeekHttp {
    * 登录后的热身：只对「还没用过」的账号做一次，闲聊 1~2 句，然后打上 warmupAt。
    * 失败不阻塞真实请求（记日志、标记跳过），避免热身把主流程拖死。
    */
+  /** 空闲时补 warmup：有请求在跑就往后让，绝不和用户的消息抢同一个账号 */
+  _warmupWhenIdle(prefer = null) {
+    if (this._warmingDone || this._warmupTimer) return;
+    const cfg = loadConfig();
+    if (!cfg.warmup) return;
+    this._warmupTimer = setTimeout(() => {
+      this._warmupTimer = null;
+      if (this._active > 0) {
+        this._warmupWhenIdle(prefer);
+        return;
+      }
+      this._maybeWarmup(prefer).catch((e) => this.log('[warmup] 跳过：' + String((e && e.message) || e).slice(0, 120)));
+    }, 25000);
+    if (this._warmupTimer.unref) this._warmupTimer.unref();
+  }
+
   async _maybeWarmup(prefer = null) {
     if (this._warmingDone) return null;
     const cfg = loadConfig();

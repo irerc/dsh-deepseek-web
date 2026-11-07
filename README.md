@@ -35,7 +35,7 @@ git+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web.git
 **② 发行版压缩包（镜像，最快）**
 
 ```
-https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.69/dsh-deepseek-web-1.0.69.tgz
+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.70/dsh-deepseek-web-1.0.70.tgz
 ```
 
 **③ 仓库页（镜像浏览）**
@@ -47,7 +47,7 @@ https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web
 > 镜像不可用时，把上面链接里的 `https://gh-proxy.com/` 去掉即可直连 GitHub（官方速度可能较慢）：
 >
 > - 插件 spec：`https://github.com/irerc/dsh-deepseek-web`
-> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.69/dsh-deepseek-web-1.0.69.tgz`
+> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.70/dsh-deepseek-web-1.0.70.tgz`
 
 **不需要任何 API key**：插件自带 provider 配置与本地网关（`127.0.0.1:18081`），装好即用。
 
@@ -340,6 +340,24 @@ bin/cli.mjs           login/accounts/start/stop/status/doctor
 MIT License
 
 ## 更新日志
+
+### v1.0.70
+**第一条消息不再等了，整轮也不再被「假打字」拖慢**
+
+三条实测出来的慢因，逐条拆掉：
+
+| 慢在哪 | 以前 | 现在 |
+|---|---|---|
+| 首条消息 | `await` 两句 warmup 闲聊 + 节律，重启后第一句能等一分钟 | warmup 移到**空闲后台**（25s 无请求才跑），首句直接发 |
+| 间歇后开口 | 不管隔了多久，都按 30s+ 的「输出间隔」摆着等 | 距上次请求 >90s 视为「人回来了」，**跳过间隔**（实测首字 2.4s） |
+| 每一轮 | 打字时间按 prompt 字符数算，DSH 动辄几万字符 → 假打字 11~14s | prompt >800 字符不算打字（真人不会敲两万字），只留基数间隔 |
+
+还顺手修了一个真问题：容器时区是 UTC，手机是 +08:00。
+
+- `x-client-timezone-offset` 一直发成 `0`（UTC），和 `zh_CN` + 移动端 UA 自相矛盾 → 现在按设备时区发 `28800`
+- 「深夜静默」用 UTC 判断，**下午两点被当成凌晨**，间隔凭空 ×2.6 → 现在用设备时区
+
+日志也更诚实了：只在**真的等**的时候打 `[pace] 人类节律：等 Ns`，跳过时打 `[pace] 首轮/间歇后，跳过 Ns 间隔`。
 
 ### v1.0.69
 **给「到底有没有流式」装上证据**
