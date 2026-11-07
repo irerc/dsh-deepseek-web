@@ -35,7 +35,7 @@ git+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web.git
 **② 发行版压缩包（镜像，最快）**
 
 ```
-https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.72/dsh-deepseek-web-1.0.72.tgz
+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.73/dsh-deepseek-web-1.0.73.tgz
 ```
 
 **③ 仓库页（镜像浏览）**
@@ -47,7 +47,7 @@ https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web
 > 镜像不可用时，把上面链接里的 `https://gh-proxy.com/` 去掉即可直连 GitHub（官方速度可能较慢）：
 >
 > - 插件 spec：`https://github.com/irerc/dsh-deepseek-web`
-> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.72/dsh-deepseek-web-1.0.72.tgz`
+> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.73/dsh-deepseek-web-1.0.73.tgz`
 
 **不需要任何 API key**：插件自带 provider 配置与本地网关（`127.0.0.1:18081`），装好即用。
 
@@ -340,6 +340,16 @@ bin/cli.mjs           login/accounts/start/stop/status/doctor
 MIT License
 
 ## 更新日志
+
+### v1.0.73
+**登录失效的账号直接把「重新登录」摆出来；账号列表按「当前 → 可用 → 不可用」排**
+
+| 改动 | 细节 |
+|---|---|
+| 重新登录前置 | `authExpired` / `needBrowserLogin` 的账号，卡片上第一颗按钮就是**重新登录**：打开真实登录页让你**手动**登一次，成功后 token 原地回填（不依赖保存的密码，脱敏邮箱/风控都拦不住） |
+| 自动重登改名 | 「更多」里那颗用存密码的按钮改叫**自动重登（用存密码）**，和手动那条明确区分 |
+| 排序 | 当前账号 → 可用 → 不可用（登录失效 > 禁言按到期时间从短到长 > 停用/手动禁用垫底） |
+| 稳定 | 同组内按原有顺序，不随机跳位 |
 
 ### v1.0.72
 **设置面板里一半按钮「点了没反应」——不是坏了，是原生对话框被宿主掐了**
