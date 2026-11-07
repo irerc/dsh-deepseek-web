@@ -35,7 +35,7 @@ git+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web.git
 **② 发行版压缩包（镜像，最快）**
 
 ```
-https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.68/dsh-deepseek-web-1.0.68.tgz
+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.69/dsh-deepseek-web-1.0.69.tgz
 ```
 
 **③ 仓库页（镜像浏览）**
@@ -47,7 +47,7 @@ https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web
 > 镜像不可用时，把上面链接里的 `https://gh-proxy.com/` 去掉即可直连 GitHub（官方速度可能较慢）：
 >
 > - 插件 spec：`https://github.com/irerc/dsh-deepseek-web`
-> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.68/dsh-deepseek-web-1.0.68.tgz`
+> - 压缩包：`https://github.com/irerc/dsh-deepseek-web/releases/download/v1.0.69/dsh-deepseek-web-1.0.69.tgz`
 
 **不需要任何 API key**：插件自带 provider 配置与本地网关（`127.0.0.1:18081`），装好即用。
 
@@ -340,6 +340,26 @@ bin/cli.mjs           login/accounts/start/stop/status/doctor
 MIT License
 
 ## 更新日志
+
+### v1.0.69
+**给「到底有没有流式」装上证据**
+
+排查结论（实测，不是猜）：
+
+| 检查 | 结果 |
+|---|---|
+| 网关直连 SSE（`/v1/chat/completions`, stream=true） | 314 个增量，首字 +2.8s，总 6.7s —— **确实在流** |
+| 深度思考模式（`deepseek-reasoner`） | reasoning 首字 +1.4s，正文首字 +2.5s，总 3.6s —— **也在流** |
+| 你那一轮 1 分 44 秒的日志 | `[pace] 人类节律：等 34s` + 首次使用 2 句闲聊 + thinking，**前 ~40 秒本来就没有任何输出** |
+
+所以「看起来完全不流式」至少有三种可能：上游没流、网关没转发、客户端没渲染。这版把前两种变成可查的日志：
+
+```
+[stream] 首个增量 +2831ms
+[stream] 收尾 chunks=314 firstMs=2831 total=6745ms
+```
+
+`chunks` 只有 1、或 `firstMs` 接近 `total` → 真没流；两者都正常而界面仍一次性出现 → 问题在客户端渲染，不在插件。
 
 ### v1.0.68
 **「浏览器」这一档不再假装可用**

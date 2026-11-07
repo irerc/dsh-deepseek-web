@@ -775,8 +775,18 @@ async function handleChat(req, res) {
   let headersSent = false;
   const calls = [];
 
+  // 流式体检：只记「是否流式 / 首个增量多久到 / 一共几个增量」。
+  // 用户反馈「界面完全不流式」时，靠这三行就能分清是上游没流、还是客户端没渲染。
+  const streamT0 = Date.now();
+  let streamChunks = 0;
+  let streamFirstMs = 0;
   const sendChunk = (delta, finish = null) => {
     if (!stream) return;
+    if (!streamFirstMs) {
+      streamFirstMs = Date.now() - streamT0;
+      log('[stream] 首个增量 +' + streamFirstMs + 'ms');
+    }
+    streamChunks++;
     if (!headersSent) {
       res.writeHead(200, {
         'Content-Type': 'text/event-stream; charset=utf-8',
@@ -1220,6 +1230,7 @@ async function handleChat(req, res) {
     }
     res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model: modelId, choices: [], usage: usagePayload })}\n\n`);
     res.write('data: [DONE]\n\n');
+    log('[stream] 收尾 chunks=' + streamChunks + ' firstMs=' + streamFirstMs + ' total=' + (Date.now() - streamT0) + 'ms');
     return res.end();
   }
   json(res, 200, {
