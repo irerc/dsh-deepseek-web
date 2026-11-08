@@ -99,7 +99,7 @@
     if ((tries[token] || 0) >= 3) return;
     tries[token] = (tries[token] || 0) + 1;
     tip('捕获到 token（' + source + '），正在保存…');
-    fetch(REPORT, {
+    (window.__dswebRawFetch || fetch)(REPORT, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
@@ -155,9 +155,19 @@
       if (plain['user-agent']) FINGERPRINT['user-agent'] = String(plain['user-agent']);
     } catch (e) {}
   }
-  function deviceHeadersInit(init) {
+  // 只给「站点自己的请求」加设备头。回传 token 是从登录页跨源打回 DSH 主进程的，
+  // 带上 x-device-id 会触发 CORS 预检（对方只放行 content-type），结果登录成功的 token 反而存不进去。
+  function isCrossOrigin(url) {
+    try {
+      if (!url || url.charAt(0) === '/' ) return false;
+      if (!/^https?:/i.test(String(url))) return false;
+      return new URL(String(url), location.href).origin !== location.origin;
+    } catch (e) { return false; }
+  }
+  function deviceHeadersInit(init, url) {
     try {
       if (!DEVICE_ID || DEVICE_ID.charAt(0) === '_') return init || {};
+      if (isCrossOrigin(url)) return init || {};
       var out = init ? Object.assign({}, init) : {};
       var h = out.headers;
       var plain = {};
@@ -180,6 +190,7 @@
     }
   }
   var _fetch = window.fetch;
+  try { window.__dswebRawFetch = _fetch; } catch (e) {}
   if (_fetch) {
     window.fetch = function (input, init) {
       var url = typeof input === 'string' ? input : ((input && input.url) || '');
@@ -202,7 +213,7 @@
           if (m) report(m[1], '请求头');
         }
       } catch (e) {}
-      return _fetch.call(this, input, deviceHeadersInit(init)).then(function (r) {
+      return _fetch.call(this, input, deviceHeadersInit(init, url)).then(function (r) {
         clearTimeout(slow);
         if (!r.ok) tip('API ' + r.status + ' ' + url);
         try {
@@ -246,7 +257,7 @@
   XMLHttpRequest.prototype.send = function (body) {
     var xhr = this;
     try {
-      if (DEVICE_ID && DEVICE_ID.charAt(0) !== '_' && !xhr.__dswebHasDevice) {
+      if (DEVICE_ID && DEVICE_ID.charAt(0) !== '_' && !xhr.__dswebHasDevice && !isCrossOrigin(xhr.__u)) {
         _setHeader.call(xhr, 'x-device-id', DEVICE_ID);
         _setHeader.call(xhr, 'x-device-model', '');
       }

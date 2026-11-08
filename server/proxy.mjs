@@ -190,7 +190,12 @@ function filterRequestHeaders(headers) {
     'x-client-timezone-offset',
     'x-request-encryption-key',
     'x-ds-pow-response',
+    // 当前登录链路实际发的是 guest 版 PoW 头（手机号/短信登录）与 challenge 头；
+    // 以前白名单里只有旧名，登录请求转发时把这两个头丢了，站点直接 40300 Missing Header。
+    'x-ds-guest-pow-response',
+    'x-ds-challenge-response',
     'x-device-id',
+    'x-device-model',
   ];
   for (const [k, v] of Object.entries(headers)) {
     if (allow.includes(k.toLowerCase())) out[k] = v;
@@ -284,7 +289,7 @@ function refreshAssetInBackground(target, headers) {
   fetchUpstream(target, 'GET', headers, Buffer.alloc(0), 1, 4000)
     .then((r) => {
       const ctype = r.up ? String(r.up.headers['content-type'] || '') : '';
-      if (!r.up || r.up.statusCode !== 200 || !/javascript|text\/css|font|image|octet-stream/.test(ctype)) return;
+      if (!r.up || r.up.statusCode !== 200 || !/javascript|text\/css|font|image|octet-stream|wasm/.test(ctype)) return;
       const buf = rewriteAsset(target, ctype, r.buf);
       if (buf.length > 1024) writeAsset(target, buf);
     })
@@ -541,7 +546,7 @@ export function startLoginProxy({ port = 18090, reportUrl }) {
     // 浏览器早就白屏了。现在只要磁盘里有缓存就直接毫秒级发出去，再顺手在后台更新一份。
     if (isCdn) {
       const ext = path.extname(new URL(target).pathname).toLowerCase();
-      const type = ext === '.js' ? 'application/javascript; charset=utf-8' : ext === '.css' ? 'text/css; charset=utf-8' : ext === '.svg' ? 'image/svg+xml' : ext === '.woff2' || ext === '.woff' ? 'font/woff2' : 'application/octet-stream';
+      const type = ext === '.js' ? 'application/javascript; charset=utf-8' : ext === '.css' ? 'text/css; charset=utf-8' : ext === '.svg' ? 'image/svg+xml' : ext === '.woff2' || ext === '.woff' ? 'font/woff2' : ext === '.wasm' ? 'application/wasm' : 'application/octet-stream';
       const sendCached = (buf, label) => {
         logLine(label + ' ' + req.url);
         res.writeHead(200, { 'content-type': type, 'cache-control': 'public, max-age=3600' });
@@ -556,7 +561,7 @@ export function startLoginProxy({ port = 18090, reportUrl }) {
       // 没缓存才走上游：快速重试（6s × 2），失败就报错
       const r = await fetchUpstream(target, req.method, headers, body, 2, 6000);
       const ctype0 = r.up ? String(r.up.headers['content-type'] || '') : '';
-      const good = r.up && (r.up.statusCode || 0) === 200 && /javascript|text\/css|font|image|octet-stream/.test(ctype0);
+      const good = r.up && (r.up.statusCode || 0) === 200 && /javascript|text\/css|font|image|octet-stream|wasm/.test(ctype0);
       if (!good) {
         logLine('ERROR ' + (req.method || 'GET') + ' ' + req.url + ' ' + ((r.error && r.error.message) || 'unknown'));
         res.writeHead(502, { 'content-type': 'text/plain; charset=utf-8' });

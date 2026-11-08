@@ -272,3 +272,37 @@ bin/cli.mjs           login/accounts/start/stop/status/doctor
 直连网页接口属于自动化访问，可能触发站点风控；多账号会放大风险。插件做了串行、节流、真实浏览器请求头与自然提示词，但**不能保证不被限流或封禁**。
 
 MIT License
+
+## 与用户层 providers 共存
+
+插件的 `cordis.patch.yml` 往 `llm-pi-ai.config.providers` 里加 `deepseek-web`。如果你自己的 profile 里也写了 `providers:`，后应用的用户层会整段替换掉这一段，结果就是设置页有「DeepSeek 网页版」但模型列表里没有模型。
+
+把下面这段并进你自己的 `cordis.patch.yml` 即可：
+
+```yaml
+- id: llm-pi-ai
+  config:
+    providers:
+      deepseek-web:
+        displayName: DeepSeek(网页版)
+        api: openai-completions
+        baseURL: http://127.0.0.1:18081/v1
+        apiKeyEnv: DEEPSEEK_WEB_API_KEY
+        headers:
+          authorization: Bearer dsh-deepseek-web
+        defaultContextWindow: 131072
+        defaultMaxTokens: 16384
+        models:
+          - id: deepseek-chat
+            name: DeepSeek-V4(网页版·快速)
+            contextWindow: 131072
+            maxTokens: 16384
+            input:
+              - text
+          - id: deepseek-reasoner
+            name: DeepSeek-V4(网页版·深度思考)
+            contextWindow: 131072
+            maxTokens: 16384
+            input:
+              - text
+```

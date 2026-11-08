@@ -52,6 +52,7 @@ https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/latest/d
 | 登录失效 | 账号行点「重新登录」；存了密码会尝试自动重登 |
 | 被禁言 / 封号 | 站点侧处置，插件只能避让：换账号或等解封；「更多 → 按新设备重置」换设备身份 |
 | 被当成新设备验证 | 换网络（流量 / 另一条宽带）后重新登录；连续换设备会更容易被要求验证 |
+| 模型列表里没有「DeepSeek 网页版」 | 你自己的 profile 里如果也写了 `llm-pi-ai.config.providers`，用户层会整段覆盖插件的配置：把 `deepseek-web` 那一段一起写进你自己的 `cordis.patch.yml` 即可（片段见 [docs/DETAILS.md](docs/DETAILS.md)） |
 | 想要更像正常 API | 「运行」页把请求模式设成「原始模式」，关掉额外包装 |
 | 想少触发风控 | 使用「保险模式」并放慢发送节奏；提示词别太模板化 |
 
