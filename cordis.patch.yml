@@ -2,7 +2,7 @@
 # 安装后由 DSH 的 bundle patch 机制自动应用，无需手工改 profile 的 cordis.patch.yml。
 - insert:
     - id: deepseek-web
-      name: dsh-deepseek-web
+      name: '@irerc/dsh-deepseek-web'
 
 - id: llm-pi-ai
   config:

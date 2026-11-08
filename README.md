@@ -21,10 +21,13 @@
 任选一条，粘到 DSH「插件 → 安装插件」：
 
 ```text
-# ① 仓库（中国大陆推荐走 gh-proxy 镜像）
+# ① npm（最省事）
+dsh plugin add @irerc/dsh-deepseek-web
+
+# ② 仓库（中国大陆推荐走 gh-proxy 镜像）
 git+https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web.git
 
-# ② 发行版压缩包（最快）
+# ③ 发行版压缩包（镜像）
 https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/latest/download/dsh-deepseek-web.tgz
 ```
 
