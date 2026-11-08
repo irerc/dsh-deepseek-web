@@ -19,6 +19,8 @@ export const CONFIG_VERSION = 2;
 export const DEFAULTS = {
   configVersion: CONFIG_VERSION,
   autoStart: true, // 首次调用时自动拉起引擎
+  // 下载浏览器内核时的并发分片数：0 = 自动（先测单流，慢才并发）；1 = 单流；2~16 = 强制
+  engineThreads: 0,
   idleStopMs: 10 * 60 * 1000, // 空闲多久关停引擎
   // 同一账号两次请求的间隔：**随机区间**（min~max）。固定间隔方差≈0，统计上就是「定时器特征」，
   // 真人打字不是等距的 —— 参考实现用 2000~4000ms 随机区间（cuckoo-code 从未被风控）。

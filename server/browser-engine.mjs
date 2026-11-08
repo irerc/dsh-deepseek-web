@@ -15,7 +15,7 @@ import os from 'node:os';
 import path from 'node:path';
 import https from 'node:https';
 import { spawn, spawnSync } from 'node:child_process';
-import { STATE_DIR } from './config.mjs';
+import { STATE_DIR, loadConfig } from './config.mjs';
 
 /** 固定在两个源都存在的版本；要升级改这里（新版本先确认两个源都有再改） */
 export const ENGINE_VERSION = '157.0.8103.38';
@@ -114,6 +114,10 @@ const state = {
   total: 0,
   percent: 0,
   speedBps: 0,
+  parallel: false,
+  threads: 0,
+  lastTick: 0,
+  lastBytes: 0,
   error: '',
   startedAt: 0,
   finishedAt: 0,
@@ -142,6 +146,154 @@ export function engineStatus() {
 function setProgress(patch) {
   Object.assign(state, patch);
   if (state.total > 0) state.percent = Math.min(100, Math.round((state.received / state.total) * 100));
+}
+
+/** 探测是否支持分片：返回 { ok, total }。GET Range: bytes=0-0 看是否 206 + 总长 */
+function probeRange(url, timeoutMs = 20000) {
+  return new Promise((resolve) => {
+    let redirects = 0;
+    const go = (target) => {
+      const req = https.get(
+        target,
+        { headers: { 'user-agent': 'dsh-deepseek-web-engine/1.0', range: 'bytes=0-0', accept: '*/*' }, timeout: timeoutMs },
+        (res) => {
+          const code = res.statusCode || 0;
+          if (code >= 300 && code < 400 && res.headers.location) {
+            res.resume();
+            if (++redirects > 6) return resolve({ ok: false, total: 0 });
+            return go(new URL(res.headers.location, target).toString());
+          }
+          const cr = String(res.headers['content-range'] || '');
+          const total = Number((/\/(\d+)/.exec(cr) || [])[1] || res.headers['content-length'] || 0);
+          res.resume();
+          resolve({ ok: code === 206 && total > 0, total });
+        },
+      );
+      req.on('timeout', () => { req.destroy(); resolve({ ok: false, total: 0 }); });
+      req.on('error', () => resolve({ ok: false, total: 0 }));
+    };
+    go(url);
+  });
+}
+
+/** 单段 Range 下载到 fd 的指定偏移，失败重试 */
+function fetchRange(url, fd, start, end, onBytes, { timeoutMs = 120000, retries = 2 } = {}) {
+  return new Promise((resolve, reject) => {
+    const attempt = (n) => {
+      let redirects = 0;
+      let written = 0;
+      const go = (target) => {
+        const req = https.get(
+          target,
+          { headers: { 'user-agent': 'dsh-deepseek-web-engine/1.0', range: `bytes=${start}-${end}`, accept: '*/*' }, timeout: timeoutMs },
+          (res) => {
+            const code = res.statusCode || 0;
+            if (code >= 300 && code < 400 && res.headers.location) {
+              res.resume();
+              if (++redirects > 6) return done(new Error('重定向次数过多'));
+              return go(new URL(res.headers.location, target).toString());
+            }
+            if (code !== 206) {
+              res.resume();
+              return done(new Error('分段请求返回 HTTP ' + code));
+            }
+            res.on('data', (chunk) => {
+              fs.writeSync(fd, chunk, 0, chunk.length, start + written);
+              written += chunk.length;
+              onBytes(chunk.length);
+            });
+            res.on('end', () => {
+              if (written !== end - start + 1) return done(new Error('分段长度不符：' + written + '/' + (end - start + 1)));
+              done(null);
+            });
+            res.on('error', done);
+          },
+        );
+        req.on('timeout', () => req.destroy(new Error('分段超时')));
+        req.on('error', done);
+      };
+      const done = (error) => {
+        if (!error) return resolve();
+        if (n < retries) setTimeout(() => attempt(n + 1), 400 * (n + 1));
+        else reject(error);
+      };
+      go(url);
+    };
+    attempt(0);
+  });
+}
+
+/** 单连接测速：只拉 1MB 就掐断，用来看这条线路「单流」到底能跑多快。
+ *  并发不是万灵药：本机实测 npmmirror 单流 12MB/s、8 并发反而 8MB/s（出口带宽打满）；
+ *  而 Google 存储在国内常见「单流 200KB/s、8 并发 2MB/s」。所以默认先测速再决定并发数。 */
+function measureSingleSpeed(url, { bytes = 1048576, timeoutMs = 15000 } = {}) {
+  return new Promise((resolve) => {
+    const t0 = Date.now();
+    let got = 0;
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      const ms = Math.max(1, Date.now() - t0);
+      try { req.destroy(); } catch {}
+      resolve({ bytes: got, ms, speedBps: Math.round((got * 1000) / ms) });
+    };
+    const req = https.get(
+      url,
+      { headers: { 'user-agent': 'dsh-deepseek-web-engine/1.0', range: 'bytes=0-' + (bytes - 1), accept: '*/*' }, timeout: timeoutMs },
+      (res) => {
+        if (res.statusCode !== 206) { res.resume(); return finish(); }
+        res.on('data', (chunk) => {
+          got += chunk.length;
+          if (got >= bytes) finish();
+        });
+        res.on('end', finish);
+        res.on('error', finish);
+      },
+    );
+    req.on('timeout', finish);
+    req.on('error', finish);
+    setTimeout(finish, timeoutMs);
+  });
+}
+
+/** 多线程（Range 分片）下载：服务端支持 206 时把文件切成 threads 段并发拉，不支持则退回单流 */
+async function downloadParallel(url, dest, { threads = 4, onBytes, onTotal, onMode } = {}) {
+  const probe = await probeRange(url);
+  if (!probe.ok || !probe.total) {
+    onTotal(0);
+    if (onMode) onMode(false, 1);
+    await download(url, dest);
+    return { parallel: false, bytes: fs.statSync(dest).size };
+  }
+  const total = probe.total;
+  let n = Math.max(0, Math.min(Number(threads) || 0, 16));
+  if (n === 0) {
+    // 自动：先测单流；够快就单流（并发反而抢带宽），慢才上并发
+    const sample = await measureSingleSpeed(url);
+    n = sample.speedBps >= 4 * 1048576 ? 1 : 6;
+    if (onMode) onMode('auto', n, sample.speedBps);
+  }
+  n = Math.max(1, n);
+  onTotal(total);
+  if (onMode) onMode(true, n);
+  const per = Math.ceil(total / n);
+  const parts = [];
+  for (let i = 0; i < n; i++) {
+    const start = i * per;
+    if (start >= total) break;
+    parts.push({ start, end: Math.min(total - 1, start + per - 1) });
+  }
+  const fd = fs.openSync(dest, 'w');
+  fs.ftruncateSync(fd, total);
+  try {
+    await Promise.all(parts.map((p) => fetchRange(url, fd, p.start, p.end, (len) => onBytes(len))));
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
+  if (fs.statSync(dest).size !== total) throw new Error('下载不完整：' + fs.statSync(dest).size + '/' + total);
+  return { parallel: true, bytes: total, parts: parts.length };
 }
 
 /** 带重定向的 GET，边下边报进度 */
@@ -250,7 +402,7 @@ let installing = null;
  * 安装内核。source: 'cn' | 'intl'
  * 返回 { ok, version, bin, source, bytes, ms } 或抛错（错误同时写进 status.download.error）
  */
-export function installEngine({ source = 'cn' } = {}) {
+export function installEngine({ source = 'cn', threads = 0 } = {}) {
   if (installing) return installing;
   const src = SOURCES[source] || SOURCES.cn;
   const platform = platformKey();
@@ -263,12 +415,31 @@ export function installEngine({ source = 'cn' } = {}) {
   const url = src.base + '/' + ENGINE_VERSION + '/' + platform + '/' + zipName;
 
   installing = (async () => {
-    setProgress({ busy: true, source: src.key, phase: 'downloading', received: 0, total: 0, percent: 0, speedBps: 0, error: '', startedAt: Date.now(), finishedAt: 0 });
+    setProgress({ busy: true, source: src.key, phase: 'downloading', received: 0, total: 0, percent: 0, speedBps: 0, parallel: false, threads: 0, lastTick: Date.now(), lastBytes: 0, error: '', startedAt: Date.now(), finishedAt: 0 });
     const tmpDir = path.join(ENGINE_ROOT, '.tmp');
     fs.mkdirSync(tmpDir, { recursive: true, mode: 0o700 });
     const zipFile = path.join(tmpDir, zipName);
     try {
-      const dl = await download(url, zipFile);
+      // 0 = 自动（先测单流再决定并发）；1 = 强制单流；2~16 = 强制并发数
+      const workerCount = Math.max(0, Math.min(Number(threads) || Number(process.env.DSW_ENGINE_THREADS || 0) || Number(loadConfig().engineThreads) || 0, 16));
+      setProgress({ threads: workerCount, autoThreads: workerCount === 0 });
+      const dl = await downloadParallel(url, zipFile, {
+        threads: workerCount,
+        onTotal: (total) => setProgress({ total, received: 0, speedBps: 0 }),
+        onMode: (parallel, n, sampleBps) => {
+          const patch = { parallel: Boolean(parallel), threads: n };
+          // 第二次回调不带采样值，别把第一条写的测速结果覆盖成 0
+          if (typeof sampleBps === 'number') patch.sampleBps = sampleBps;
+          setProgress(patch);
+        },
+        onBytes: (len) => {
+          state.received += len;
+          const now = Date.now();
+          if (now - state.lastTick >= 500) {
+            setProgress({ speedBps: Math.round(((state.received - state.lastBytes) * 1000) / (now - state.lastTick)), lastTick: now, lastBytes: state.received });
+          }
+        },
+      });
       setProgress({ phase: 'verifying' });
       verifyZip(zipFile);
       setProgress({ phase: 'extracting' });
@@ -306,8 +477,8 @@ export function installEngine({ source = 'cn' } = {}) {
       fs.writeFileSync(RECORD_FILE, JSON.stringify(rec, null, 2) + '\n', { mode: 0o600 });
       fs.rmSync(zipFile, { force: true });
       fs.rmSync(staging, { recursive: true, force: true });
-      setProgress({ phase: 'done', busy: false, finishedAt: Date.now(), percent: 100 });
-      return { ok: true, version: ENGINE_VERSION, bin: paths.bin, source: src.key, bytes: dl.bytes, ms: Date.now() - state.startedAt, chromeVersion: ver };
+      setProgress({ phase: 'done', busy: false, finishedAt: Date.now(), percent: 100, parallel: Boolean(dl.parallel), threads: dl.parts || 1 });
+      return { ok: true, version: ENGINE_VERSION, bin: paths.bin, source: src.key, bytes: dl.bytes, ms: Date.now() - state.startedAt, chromeVersion: ver, parallel: Boolean(dl.parallel), threads: dl.parts || 1 };
     } catch (error) {
       try {
         fs.rmSync(zipFile, { force: true });

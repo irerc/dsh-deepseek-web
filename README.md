@@ -57,7 +57,9 @@ https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/latest/d
 | 大陆镜像（npmmirror） | 中国大陆 | 8–22 MB/s，约 25 秒 |
 | 国际直连（Google） | 海外 / 已出海 | 取决于线路 |
 
-约 200MB，解压后 425MB，装在本机 `state/browser/`，不进插件包。
+约 200MB，解压后 425MB，装在本机 `state/browser/`，不进插件包。下载默认**自适应线程数**（先测单流，慢才并发；可在卡片里强制 1~16）。
+
+各平台能不能内嵌内核、用什么宿主、为什么 Android 上只能走 App WebView，见 [docs/BROWSER-EMBEDDING.md](docs/BROWSER-EMBEDDING.md)。
 
 ## 常见问题
 
