@@ -14,6 +14,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { STATE_DIR, loadConfig } from './config.mjs';
+import { engineExecutable } from './browser-engine.mjs';
 import { UA, BASE } from './http.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -73,6 +74,11 @@ export function browserCandidates() {
   try {
     const custom = loadConfig().browserPath;
     if (custom) push(custom);
+  } catch {}
+  // 插件自己下载的内核：用户点了「下载浏览器内核」就用它，避免「装了却还在用系统那个」
+  try {
+    const managed = engineExecutable();
+    if (managed) push(managed);
   } catch {}
   const home = os.homedir();
   if (process.platform === 'win32') {
@@ -197,32 +203,54 @@ export async function browserAvailability({ force = false, bin = '' } = {}) {
   const now = Date.now();
   if (!force && !bin && _avail.value && now - _avail.at < AVAIL_TTL) return _avail.value;
   const explicit = String(bin || '').trim();
-  const pathFound = explicit ? (isExecutable(explicit) ? explicit : '') : findBrowser();
-  let value;
-  if (!pathFound) {
-    value = {
-      ok: false,
-      found: false,
-      path: '',
-      version: '',
-      reason: explicit
-        ? '指定的浏览器路径不存在或不可执行：' + explicit
-        : '没找到 Chrome / Edge / Chromium 可执行文件（PATH、/opt、snap、flatpak、Playwright/Puppeteer 缓存都没命中）',
-    };
-  } else {
+  // 逐个候选试到第一个「真能开页面」的：插件自带的内核排在最前，但它在本机跑不起来时
+  // （比如 Android 容器里 SIGTRAP）不能让后面能用的系统浏览器被挡掉。
+  const candidates = explicit ? [explicit] : browserCandidates().filter((p, i, a) => a.indexOf(p) === i);
+  const exe = candidates.filter((p) => isExecutable(p)).slice(0, 4);
+  let value = null;
+  let failed = null;
+  for (const pathFound of exe) {
     const version = await browserVersionOf(pathFound);
     const s = await smokeTest(pathFound);
-    value = {
-      ok: Boolean(s.ok),
+    if (s.ok) {
+      value = {
+        ok: true,
+        found: true,
+        path: pathFound,
+        version,
+        reason: '',
+        signal: '',
+        code: 0,
+        tail: '',
+        ms: s.ms || 0,
+        managed: pathFound === (() => { try { return engineExecutable(); } catch { return ''; } })(),
+      };
+      break;
+    }
+    failed = {
+      ok: false,
       found: true,
       path: pathFound,
       version,
-      reason: s.ok ? '' : String(s.reason || '启动失败'),
+      reason: String(s.reason || '启动失败'),
       signal: s.signal || '',
       code: s.code === undefined ? null : s.code,
       tail: s.tail || '',
       ms: s.ms || 0,
     };
+  }
+  if (!value) {
+    value = exe.length
+      ? { ...failed, triedCount: exe.length, reason: failed.reason + (exe.length > 1 ? '（已试 ' + exe.length + ' 个候选）' : '') }
+      : {
+          ok: false,
+          found: false,
+          path: '',
+          version: '',
+          reason: explicit
+            ? '指定的浏览器路径不存在或不可执行：' + explicit
+            : '没找到 Chrome / Edge / Chromium 可执行文件（PATH、/opt、snap、flatpak、Playwright/Puppeteer 缓存、插件自带内核都没命中），可在「运行设置 → 浏览器内核」里下载一份',
+        };
   }
   if (!bin) _avail = { at: now, value };
   return value;

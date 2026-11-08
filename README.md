@@ -48,6 +48,17 @@ https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/latest/d
 
 本地网关默认 `127.0.0.1:18081`，只监听回环，不对外暴露。
 
+## 浏览器内核（可选）
+
+默认不用浏览器也能跑（Node / native 两档）。想让请求真的从 Chrome 页面里发出去，在设置 →「运行」→「浏览器内核」点下载，两个源任选：
+
+| 源 | 适合 | 实测 |
+|---|---|---|
+| 大陆镜像（npmmirror） | 中国大陆 | 8–22 MB/s，约 25 秒 |
+| 国际直连（Google） | 海外 / 已出海 | 取决于线路 |
+
+约 200MB，解压后 425MB，装在本机 `state/browser/`，不进插件包。
+
 ## 常见问题
 
 | 问题 | 处理 |
