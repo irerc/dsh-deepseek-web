@@ -48,6 +48,19 @@ https://gh-proxy.com/https://github.com/irerc/dsh-deepseek-web/releases/latest/d
 
 本地网关默认 `127.0.0.1:18081`，只监听回环，不对外暴露。
 
+## 运行环境自动选择
+
+启动时探测平台和已有内核，自动挑一个：
+
+| 平台 | 优先用 | 都没有时 |
+|---|---|---|
+| Windows | WebView2（系统自带）→ Edge → Chrome | 推荐下载 win64 内核 |
+| Android | App 内 WebView（系统 Chromium） | 说明为什么容器内 Chromium 不可用 |
+| macOS | 系统 Chrome | 推荐下载 mac-arm64 / mac-x64 |
+| Linux | 系统 Chrome/Chromium | 推荐下载 linux64 / linux-arm64 |
+
+设置页「运行环境与内核选择」能看到检测结果和「重新检测」按钮，推荐下载时直接给两个源。
+
 ## 浏览器内核（可选）
 
 默认不用浏览器也能跑（Node / native 两档）。想让请求真的从 Chrome 页面里发出去，在设置 →「运行」→「浏览器内核」点下载，两个源任选：
